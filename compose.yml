@@ -1,0 +1,30 @@
+services:
+  sish:
+    image: antoniomika/sish:latest
+    container_name: sish
+    restart: unless-stopped
+    network_mode: host
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./keys:/keys
+      - ./ssl:/ssl:ro
+      - ./pubkeys:/pubkeys:ro
+
+    command:
+      - --ssh-address=:${SISH_SSH_PORT:-2222}
+      - --http-address=:${SISH_HTTP_PORT:-80}
+      - --https-address=:${SISH_HTTPS_PORT:-443}
+      - --domain=${TUNNEL_DOMAIN}
+
+      - --authentication=true
+      - --authentication-keys-directory=/pubkeys
+      - --private-keys-directory=/keys
+      - --verify-dns=false
+      - --bind-random-subdomains=false
+      - --bind-random-ports=true
+
+      - --https
+      - --https-certificate-directory=/ssl
