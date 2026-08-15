@@ -90,13 +90,13 @@ services:
       CONTROL_PLANE_INTERNAL_TOKEN_FILE: /run/secrets/control-plane-internal-token
       SISH_MANAGEMENT_URL: http://127.0.0.1:8082
       SISH_MANAGEMENT_TOKEN_FILE: /run/secrets/sish-management-token
-      CONTROL_PLANE_HOST: ${CONTROL_PLANE_HOST:-}
+      CONTROL_PLANE_HOST: tunnel.${TUNNEL_DOMAIN}
       DATABASE_PATH: /data/control-plane.db
       PUBKEYS_DIR: /pubkeys
       COOKIE_SECURE: "true"
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
       DISCORD_CLIENT_SECRET_FILE: /run/secrets/discord-client-secret
-      DISCORD_REDIRECT_URI: ${DISCORD_REDIRECT_URI}
+      DISCORD_REDIRECT_URI: https://tunnel.${TUNNEL_DOMAIN}/auth/callback
       SESSION_SECRET_FILE: /run/secrets/session-secret
       ADMIN_DISCORD_IDS: ${ADMIN_DISCORD_IDS:-}
       VERCEL_TOKEN_FILE: /run/secrets/vercel-token
