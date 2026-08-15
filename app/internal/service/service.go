@@ -32,7 +32,7 @@ var (
 
 const MaxPublicKeyBytes = 16 * 1024
 
-var ReservedSubdomains = map[string]struct{}{"ssh": {}, "www": {}, "api": {}, "admin": {}, "auth": {}, "app": {}, "status": {}, "mail": {}, "smtp": {}, "ftp": {}, "ns1": {}, "ns2": {}, "_acme-challenge": {}}
+var ReservedSubdomains = map[string]struct{}{"ssh": {}, "tunnel": {}, "www": {}, "api": {}, "admin": {}, "auth": {}, "app": {}, "status": {}, "mail": {}, "smtp": {}, "ftp": {}, "ns1": {}, "ns2": {}, "_acme-challenge": {}}
 
 type PublicKeyStore interface {
 	Write(model.SSHKey) error

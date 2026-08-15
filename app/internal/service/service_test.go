@@ -172,7 +172,7 @@ func TestNormalizeSubdomain(t *testing.T) {
 			t.Fatalf("%q => %q %v", in, got, err)
 		}
 	}
-	for _, in := range []string{"www", "bad_name", "-bad", "bad-", ""} {
+	for _, in := range []string{"www", "tunnel", "bad_name", "-bad", "bad-", ""} {
 		if _, err := NormalizeSubdomain(in); err == nil {
 			t.Fatalf("%q accepted", in)
 		}
