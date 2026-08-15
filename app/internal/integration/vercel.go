@@ -20,7 +20,7 @@ type DNSChecker interface {
 }
 
 type VercelDNS struct {
-	Token, Domain, TeamID string
+	Token, Domain string
 	Client                *http.Client
 	BaseURL               string
 }
@@ -51,9 +51,6 @@ func (v *VercelDNS) HasExactRecord(ctx context.Context, label string) (bool, err
 	seen := map[string]struct{}{}
 	for page := 0; page < 100; page++ {
 		u := fmt.Sprintf("%s/v4/domains/%s/records?limit=100", strings.TrimRight(base, "/"), url.PathEscape(v.Domain))
-		if v.TeamID != "" {
-			u += "&teamId=" + url.QueryEscape(v.TeamID)
-		}
 		if until != "" {
 			u += "&until=" + url.QueryEscape(until)
 		}

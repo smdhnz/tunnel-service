@@ -25,13 +25,9 @@ SSH reverse forwarding を使って、ローカルのHTTPサービスをイン�
 例:
 
 ```env
-TUNNEL_DOMAIN=example.com
-SSH_HOST=ssh.example.com
-VPS_IP=203.0.113.10
-
-SISH_SSH_PORT=2222
-SISH_HTTP_PORT=80
-SISH_HTTPS_PORT=443
+TUNNEL_DOMAIN=fumiya.dev
+SSH_HOST=ssh.fumiya.dev
+CONTROL_PLANE_HOST=console.fumiya.dev
 
 VERCEL_TOKEN=your_vercel_token
 ```
@@ -140,9 +136,9 @@ Permission denied (publickey).
 
 ```yaml
 command:
-  - --ssh-address=:${SISH_SSH_PORT:-2222}
-  - --http-address=:${SISH_HTTP_PORT:-80}
-  - --https-address=:${SISH_HTTPS_PORT:-443}
+  - --ssh-address=:2222
+  - --http-address=:80
+  - --https-address=:443
   - --domain=${TUNNEL_DOMAIN}
 
   - --authentication=true

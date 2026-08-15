@@ -18,7 +18,7 @@ type Config struct {
 	SessionSecret                                                 string
 	CookieSecure                                                  bool
 	AdminDiscordIDs                                               map[string]bool
-	VercelToken, VercelTeamID                                     string
+	VercelToken                                                   string
 }
 
 func Load() (Config, error) {
@@ -36,7 +36,7 @@ func Load() (Config, error) {
 		TunnelDomain: strings.TrimSpace(os.Getenv("TUNNEL_DOMAIN")), SSHHost: strings.TrimSpace(os.Getenv("SSH_HOST")), SISHSSHPort: port,
 		DiscordClientID: os.Getenv("DISCORD_CLIENT_ID"), DiscordClientSecret: secret("DISCORD_CLIENT_SECRET"), DiscordRedirectURI: os.Getenv("DISCORD_REDIRECT_URI"),
 		SessionSecret: secret("SESSION_SECRET"), CookieSecure: cookieSecure,
-		AdminDiscordIDs: csvSet(os.Getenv("ADMIN_DISCORD_IDS")), VercelToken: secret("VERCEL_TOKEN"), VercelTeamID: os.Getenv("VERCEL_TEAM_ID"),
+		AdminDiscordIDs: csvSet(os.Getenv("ADMIN_DISCORD_IDS")), VercelToken: secret("VERCEL_TOKEN"),
 	}
 	if c.TunnelDomain == "" || c.SSHHost == "" {
 		return Config{}, errors.New("TUNNEL_DOMAIN and SSH_HOST are required")

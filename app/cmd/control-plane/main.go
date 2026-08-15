@@ -35,7 +35,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
-	dns := &integration.VercelDNS{Token: cfg.VercelToken, Domain: cfg.TunnelDomain, TeamID: cfg.VercelTeamID}
+	dns := &integration.VercelDNS{Token: cfg.VercelToken, Domain: cfg.TunnelDomain}
 	sish, err := integration.NewSishClient(cfg.SISHManagementURL, cfg.SISHManagementTokenFile)
 	if err != nil {
 		logger.Error("sish management configuration failed", "error", err)
