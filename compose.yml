@@ -64,7 +64,7 @@ services:
       SSH_HOST: ${SSH_HOST}
       SSH_PORT: "2222"
       SSH_USER: tunnel-control-plane
-      REMOTE_LABEL: console
+      REMOTE_LABEL: tunnel
     volumes:
       - ./secrets/control-plane-tunnel-key:/run/secrets/control-plane-tunnel-key:ro
       - ./secrets/sish-known-hosts:/run/secrets/sish-known-hosts:ro

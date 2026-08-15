@@ -27,7 +27,7 @@ SSH reverse forwarding を使って、ローカルのHTTPサービスをイン�
 ```env
 TUNNEL_DOMAIN=fumiya.dev
 SSH_HOST=ssh.fumiya.dev
-CONTROL_PLANE_HOST=console.fumiya.dev
+CONTROL_PLANE_HOST=tunnel.fumiya.dev
 
 VERCEL_TOKEN=your_vercel_token
 ```
