@@ -371,20 +371,16 @@ SSH公開鍵そのものは秘密情報ではありませんが、`pubkeys/` は
 * TLS certificate renewal dry-run: 成功
 * Vercel DNS APIによるTXT作成・削除: 動作確認済み
 
-一方で、まだPoC段階のため以下は未実装です。
+Control Planeとrepo内sish hardening patchで以下を追加しています。
 
-* Web user authentication
-* User / SSH key mapping
-* Per-user subdomain authorization
-* TCP port authorization
-* Rate limiting
-* Connection limits
-* Abuse prevention
-* Audit logging
-* Tunnel lifecycle management
-* Revocation workflow
-* Admin GUI
-* Security event monitoring
+* Discord Web user authentication、User / SSH key mapping、revocation workflow
+* 予約所有者・有効鍵・active userをbind時に照合するper-user subdomain authorization
+* Active tunnel lifecycle、user/admin live UI、鍵・ユーザー・hostname単位の強制切断
+* Subdomain予約・Vercel DNS競合防止、transactional audit/outbox
+* bounded per-IP rate/connection limit、temporary block、unknown-host lightweight 404
+* 404とは分離した分単位の集約security telemetry
+
+TCP tunnelは有効ユーザーの有効鍵かつ明示的な1〜65535番portだけを認可します。TCP portのユーザー別予約台帳はまだ提供していないため、HTTP/HTTPS subdomain認可より粒度が粗い点に注意してください。
 
 ## Security Considerations
 
@@ -399,7 +395,7 @@ SSH公開鍵そのものは秘密情報ではありませんが、`pubkeys/` は
 --authentication-keys-directory=/pubkeys
 ```
 
-今後は単純な公開鍵ファイル方式から、Control Plane経由の認証・認可へ移行する予定です。
+SSHログイン自体は公開鍵directoryを維持し、各remote-forward requestはControl Planeのloopback authorization APIでも検証します。Control Planeのtimeout、エラー、denyは `required` modeでfail closedです。
 
 想定する構成:
 
@@ -421,32 +417,82 @@ Control Plane
 sish
 ```
 
-## Planned Control Plane
+## Control Plane MVP
 
-GUI / Control Planeでは以下を管理する予定です。
+`app/` に単一のGo applicationとして実装しています。
 
-* User accounts
-* SSH public keys
-* Reserved subdomains
-* TCP ports
-* Active tunnels
-* Tunnel history
-* Account settings
-* Security events
+* Discord OAuth2 login（state検証、一回限りstate、session rotation）
+* SQLite user / session / SSH key / subdomain / audit log管理
+* OpenSSH公開鍵検証、fingerprint・重複検査
+* `pubkeys/control-plane-<user-id>-<key-id>.pub` へのatomic反映（予約prefixにより既存手動鍵と分離）
+* Vercel DNS APIのread-only exact record競合検査（障害時fail closed）
+* User dashboard / SSH Keys / Subdomains
+* Admin dashboard / Users / SSH Keys / Subdomains / Active Tunnels / Security telemetry
+* CSRF、server-side authorization、security headers、CSP、body size・rate制限
+* `active_tunnels`、集約`security_telemetry`、transactional `outbox`
 
-## Planned GUI
+内部は `config / store / service / integration / web` に分離しています。migrationは起動時に適用し、SQLiteではWAL、busy timeout、foreign keysを有効化します。鍵・subdomain・user状態のmutation、audit、outbox enqueueは同じSQLite transactionで確定します。filesystem失効とsish切断は即時実行に加え、idempotentなoutbox workerが指数backoff（最大5分）で永続retryします。起動後はsishのsequence付きregistry snapshotを5秒間隔で同期します。callbackとsnapshotはevent ID/sequenceで冪等化され、古いsnapshotは拒否します。management API障害時は接続を削除せず `stale`、失効要求中は `disconnecting` と表示し、sishからdisconnect確認後だけ `disconnected` にします。
 
-想定する画面:
+### Local development
 
-```text
-Dashboard
-├── Tunnels
-├── Subdomains
-├── TCP Ports
-├── SSH Keys
-├── Security
-└── Account
+GoをインストールしたWSLではDockerなしで起動できます。
+
+```bash
+cp .env.example .env
+# .envへDiscord OAuth設定、SESSION_SECRET等を設定
+cd app
+set -a; source ../.env; set +a
+go run ./cmd/control-plane
 ```
+
+ローカルHTTPでは `COOKIE_SECURE=false` を使用できますが、redirect URIのhostは `localhost` またはloopback addressに限定されます。本番は `COOKIE_SECURE=true` とHTTPS redirect URIが必須で、session/state cookieは `__Host-` prefix、`Path=/`、host-only、Secure、HttpOnlyになります。`CONTROL_PLANE_HOST` を設定した場合はredirect URIのhostと一致させてください。
+
+Docker Composeでは、先にbind mount先をdeploy user所有で作成してから起動します。Composeは存在しないdirectoryをroot所有で暗黙作成せずfail fastします。
+
+```bash
+install -d -m 0750 data pubkeys keys ssl secrets
+# sishとControl Planeは同じ非root UID/GIDで動作する。値は.envと一致させる。
+chown -R "${CONTROL_PLANE_UID:-1000}:${CONTROL_PLANE_GID:-1000}" data pubkeys keys ssl secrets
+umask 077
+openssl rand -base64 48 > secrets/control-plane-internal-token
+openssl rand -base64 48 > secrets/sish-management-token
+printf '%s' "$DISCORD_CLIENT_SECRET" > secrets/discord-client-secret
+openssl rand -base64 48 > secrets/session-secret
+printf '%s' "$VERCEL_TOKEN" > secrets/vercel-token
+chmod 0400 secrets/*
+# 1000:1000以外で動かす場合は.envのUID/GIDを `id -u` / `id -g` に合わせる
+# 既存証明書は .crt=0644 / .key=0640、keys/は上記UID/GID所有にする
+find ssl -type f -name '*.crt' -exec chmod 0644 {} +
+find ssl -type f -name '*.key' -exec chmod 0640 {} +
+docker compose up --build -d
+```
+
+Control Planeは `data/` と `pubkeys/` へ書き込み、sishは `keys/` へhost keyを書き込みます。両containerの `CONTROL_PLANE_UID` / `CONTROL_PLANE_GID` はbind mountとsecret fileを所有するdeploy userのIDへ合わせてください。sishは従来どおり `pubkeys/` と `ssl/` をread-only mountし、tokenは0400、TLS秘密鍵は0640で同UID/GIDだけが読めます。両containerはread-only root filesystem、全capability drop、`no-new-privileges`で動作し、sishだけが80/443 bind用の`NET_BIND_SERVICE`を持ちます。Certbot deploy hook installerはこのUID/GIDとmodeを生成hookへ固定します。`control-plane-` prefixはControl Plane管理用に予約し、このprefixがない既存手動鍵（数字形式のファイル名を含む）は削除・上書きしません。
+
+### Secret isolation
+
+Composeは `.env` をinterpolationへ使用しますが、secret値をcontainer環境変数やcommand lineへ展開しません。`secrets/` のread-only fileを必要なcontainerだけへmountします。sishが受け取るのはControl Plane internal API tokenとsish management API tokenだけで、Discord secret、session secret、Vercel tokenは受け取りません。Control PlaneのVercel integrationはDNS record一覧のGETだけを実装し、作成・更新・削除を行いません。Certbot scriptsの既存DNS-01更新処理とは分離されています。
+
+### Internet scans and unknown hosts
+
+未登録hostnameはsishで対応するtunnelを探索後、backendへproxyせずbodyなし404で終了します。unknown-host 404は1件ずつapplication log/audit DBへ書かず、`unknown_host` counterとして分単位で集約します。sishは`RemoteAddr`だけをIP判定に使い、未設定のproxy headerを信頼しません。per-IP stateは最大10,000件です。HTTP/HTTPS/TCP/SSHはprotocol解析前のaccept段階で接続数を制限（HTTP/TCP 50、SSH 20）し、HTTP serverは5秒のReadHeaderTimeoutを設定します。request bucketは120 burst・毎秒2回復、accept bucketは60 burst・毎秒1回復で、違反継続時は5分blockします。Control Planeにもgeneral/login/mutation別のbounded limiterがあります。
+
+### sish patchと認可mode
+
+upstreamの `authentication-key-request-url` はSSH鍵のログイン可否だけを受け取り、requested bindを受け取りません。そのため `sish/Dockerfile` はupstream commit `9609e83bb87aa7c65b14a67e84738c9ad13cd3ca` を固定取得し、`sish/patches/control-plane.patch` を `git apply --check` 後にbuildします。upstream全体はvendorしません。
+
+* `required`（default）: callback deny・timeout・error、未移行manual key、所有外hostnameをbind拒否。random subdomain fallbackも禁止
+* `audit`: callback結果を記録しつつ移行中のbindを継続。セキュリティ境界として使用しない
+
+#### 既存manual keyからの無停止移行
+
+1. `SISH_CONTROL_PLANE_MODE=audit` でpatched sishを起動する
+2. 既存利用者をDiscord loginさせ、manual keyと利用hostnameをControl Planeへ登録・予約する
+3. AdminのActive Tunnelsとsecurity telemetryでdeny候補がないことを確認する
+4. `.env` を `SISH_CONTROL_PLANE_MODE=required` へ変更し、`docker compose up -d sish` を実行する
+5. manual `.pub` はrequired modeでログインできても全bindが拒否されるため、確認後に手動削除する
+
+認可切替のrollbackは `SISH_CONTROL_PLANE_MODE=audit docker compose up -d sish` です。これは一時的にbind制限を緩和するため、障害復旧後すぐrequiredへ戻してください。DB migration前には `data/control-plane.db*` を整合した状態でbackupしてください。既存の80/443/2222、`keys/`、`ssl/`、`pubkeys/`、Certbot deploy hookは変更していません。
 
 ## Future Features
 

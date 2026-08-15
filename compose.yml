@@ -1,17 +1,43 @@
 services:
   sish:
-    image: antoniomika/sish:latest
+    build:
+      context: ./sish
+      args:
+        SISH_COMMIT: 9609e83bb87aa7c65b14a67e84738c9ad13cd3ca
+    image: tunnel-service-sish:local
     container_name: sish
     restart: unless-stopped
     network_mode: host
+    user: "${CONTROL_PLANE_UID:-1000}:${CONTROL_PLANE_GID:-1000}"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:mode=1770,uid=${CONTROL_PLANE_UID:-1000},gid=${CONTROL_PLANE_GID:-1000}
 
-    env_file:
-      - .env
-
+    # Compose reads .env for interpolation. sish receives only its two scoped,
+    # read-only loopback API tokens; OAuth, Vercel and session secrets are isolated.
+    environment:
+      SISH_CONTROL_PLANE_URL: http://127.0.0.1:${CONTROL_PLANE_INTERNAL_PORT:-8081}
+      SISH_CONTROL_PLANE_TOKEN_FILE: /run/secrets/control-plane-internal-token
+      SISH_CONTROL_PLANE_MODE: ${SISH_CONTROL_PLANE_MODE:-required}
+      SISH_CONTROL_PLANE_TIMEOUT: ${SISH_CONTROL_PLANE_TIMEOUT:-2s}
+      SISH_ABUSE_HTTP_MAX_CONNECTIONS: ${SISH_ABUSE_HTTP_MAX_CONNECTIONS:-50}
+      SISH_ABUSE_SSH_MAX_CONNECTIONS: ${SISH_ABUSE_SSH_MAX_CONNECTIONS:-20}
+      SISH_ABUSE_ACCEPT_BURST: ${SISH_ABUSE_ACCEPT_BURST:-60}
+      SISH_ABUSE_REQUEST_BURST: ${SISH_ABUSE_REQUEST_BURST:-120}
+      SISH_ABUSE_TEMPORARY_BLOCK: ${SISH_ABUSE_TEMPORARY_BLOCK:-5m}
+      SISH_ABUSE_HTTP_READ_HEADER_TIMEOUT: ${SISH_ABUSE_HTTP_READ_HEADER_TIMEOUT:-5s}
+      SISH_ABUSE_SSH_HANDSHAKE_TIMEOUT: ${SISH_ABUSE_SSH_HANDSHAKE_TIMEOUT:-10s}
+      SISH_CONTROL_PLANE_MANAGEMENT_ADDRESS: 127.0.0.1:${SISH_MANAGEMENT_PORT:-8082}
+      SISH_CONTROL_PLANE_MANAGEMENT_TOKEN_FILE: /run/secrets/sish-management-token
     volumes:
       - ./keys:/keys
       - ./ssl:/ssl:ro
       - ./pubkeys:/pubkeys:ro
+      - ./secrets/control-plane-internal-token:/run/secrets/control-plane-internal-token:ro
+      - ./secrets/sish-management-token:/run/secrets/sish-management-token:ro
 
     command:
       - --ssh-address=:${SISH_SSH_PORT:-2222}
@@ -24,7 +50,58 @@ services:
       - --private-keys-directory=/keys
       - --verify-dns=false
       - --bind-random-subdomains=false
+      - --force-requested-subdomains=true
       - --bind-random-ports=true
 
       - --https
       - --https-certificate-directory=/ssl
+
+  control-plane:
+    build: ./app
+    container_name: tunnel-control-plane
+    restart: unless-stopped
+    network_mode: host
+    user: "${CONTROL_PLANE_UID:-1000}:${CONTROL_PLANE_GID:-1000}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:mode=1770,uid=${CONTROL_PLANE_UID:-1000},gid=${CONTROL_PLANE_GID:-1000}
+
+    environment:
+      TUNNEL_DOMAIN: ${TUNNEL_DOMAIN}
+      SSH_HOST: ${SSH_HOST}
+      SISH_SSH_PORT: ${SISH_SSH_PORT:-2222}
+      CONTROL_PLANE_ADDR: ${CONTROL_PLANE_ADDR:-:8080}
+      CONTROL_PLANE_INTERNAL_ADDR: 127.0.0.1:${CONTROL_PLANE_INTERNAL_PORT:-8081}
+      CONTROL_PLANE_INTERNAL_TOKEN_FILE: /run/secrets/control-plane-internal-token
+      SISH_MANAGEMENT_URL: http://127.0.0.1:${SISH_MANAGEMENT_PORT:-8082}
+      SISH_MANAGEMENT_TOKEN_FILE: /run/secrets/sish-management-token
+      CONTROL_PLANE_HOST: ${CONTROL_PLANE_HOST:-}
+      DATABASE_PATH: /data/control-plane.db
+      PUBKEYS_DIR: /pubkeys
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
+      DISCORD_CLIENT_SECRET_FILE: /run/secrets/discord-client-secret
+      DISCORD_REDIRECT_URI: ${DISCORD_REDIRECT_URI}
+      SESSION_SECRET_FILE: /run/secrets/session-secret
+      ADMIN_DISCORD_IDS: ${ADMIN_DISCORD_IDS:-}
+      VERCEL_TOKEN_FILE: /run/secrets/vercel-token
+      VERCEL_TEAM_ID: ${VERCEL_TEAM_ID:-}
+
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./pubkeys
+        target: /pubkeys
+        bind:
+          create_host_path: false
+      - ./secrets/control-plane-internal-token:/run/secrets/control-plane-internal-token:ro
+      - ./secrets/sish-management-token:/run/secrets/sish-management-token:ro
+      - ./secrets/discord-client-secret:/run/secrets/discord-client-secret:ro
+      - ./secrets/session-secret:/run/secrets/session-secret:ro
+      - ./secrets/vercel-token:/run/secrets/vercel-token:ro
