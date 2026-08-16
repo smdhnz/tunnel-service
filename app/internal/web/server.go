@@ -69,7 +69,24 @@ func New(cfg config.Config, st *store.Store, svc *service.Service, logger *slog.
 		if t.IsZero() {
 			return "-"
 		}
-		return t.Local().Format("2006-01-02 15:04")
+		return t.UTC().Format("2006-01-02 15:04:05 UTC")
+	}, "iso": func(t time.Time) string {
+		if t.IsZero() {
+			return ""
+		}
+		return t.UTC().Format(time.RFC3339)
+	}, "securityEvent": func(event string) string {
+		labels := map[string]string{
+			"unknown_host":         "未登録ホストへのアクセス",
+			"rate_limited":         "アクセス頻度の上限超過",
+			"temporarily_blocked":  "一時的にブロック",
+			"connection_limited":   "同時接続数の上限超過",
+			"authorization_denied": "認証・認可の拒否",
+		}
+		if label, ok := labels[event]; ok {
+			return label
+		}
+		return event
 	}, "short": func(v string) string {
 		if len(v) > 42 {
 			return v[:42] + "…"
@@ -126,7 +143,7 @@ func (s *Server) routes() {
 }
 func (s *Server) security(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' https://cdn.discordapp.com data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' https://cdn.discordapp.com data:; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -358,7 +375,7 @@ func (s *Server) base(r *http.Request, title, page string) Page {
 	return Page{Title: title, Page: page, CSRF: c.CSRF, User: c.User, TunnelDomain: s.cfg.TunnelDomain, SSHHost: s.cfg.SSHHost, SSHPort: s.cfg.SISHSSHPort, Flash: flash(r.URL.Query().Get("flash")), Error: r.URL.Query().Get("error")}
 }
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
-	p := s.base(r, "Dashboard", "dashboard")
+	p := s.base(r, "概要", "dashboard")
 	p.Keys, _ = s.store.KeysByUser(r.Context(), p.User.ID)
 	p.Subdomains, _ = s.store.SubdomainsByUser(r.Context(), p.User.ID)
 	p.Audit, _ = s.store.RecentAuditByUser(r.Context(), p.User.ID, 8)
@@ -374,7 +391,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, p)
 }
 func (s *Server) keysPage(w http.ResponseWriter, r *http.Request) {
-	p := s.base(r, "SSH Keys", "keys")
+	p := s.base(r, "SSH公開鍵", "keys")
 	p.Keys, _ = s.store.KeysByUser(r.Context(), p.User.ID)
 	s.render(w, http.StatusOK, p)
 }
@@ -408,7 +425,7 @@ func (s *Server) keyDelete(w http.ResponseWriter, r *http.Request) {
 	s.actionRedirect(w, r, "/keys", err, "key_deleted")
 }
 func (s *Server) tunnelsPage(w http.ResponseWriter, r *http.Request) {
-	p := s.base(r, "Active Tunnels", "tunnels")
+	p := s.base(r, "接続中のトンネル", "tunnels")
 	uid := p.User.ID
 	p.ActiveTunnels, _ = s.store.ActiveTunnels(r.Context(), &uid)
 	if syncState, err := s.store.TunnelSyncState(r.Context()); err == nil {
@@ -417,7 +434,7 @@ func (s *Server) tunnelsPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, p)
 }
 func (s *Server) subdomainsPage(w http.ResponseWriter, r *http.Request) {
-	p := s.base(r, "Subdomains", "subdomains")
+	p := s.base(r, "サブドメイン", "subdomains")
 	p.Subdomains, _ = s.store.SubdomainsByUser(r.Context(), p.User.ID)
 	s.render(w, http.StatusOK, p)
 }
@@ -435,7 +452,7 @@ func (s *Server) subdomainRelease(w http.ResponseWriter, r *http.Request) {
 	s.actionRedirect(w, r, "/subdomains", err, "subdomain_released")
 }
 func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
-	p := s.base(r, "Admin Overview", "admin-home")
+	p := s.base(r, "管理概要", "admin-home")
 	p.Stats, _ = s.store.Stats(r.Context())
 	p.Audit, _ = s.store.RecentAudit(r.Context(), 12)
 	p.ActiveTunnels, _ = s.store.ActiveTunnels(r.Context(), nil)
@@ -446,7 +463,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, p)
 }
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
-	p := s.base(r, "Manage Users", "admin-users")
+	p := s.base(r, "ユーザー管理", "admin-users")
 	p.Users, _ = s.store.Users(r.Context())
 	s.render(w, http.StatusOK, p)
 }
@@ -464,7 +481,7 @@ func (s *Server) adminUserSet(w http.ResponseWriter, r *http.Request, suspended 
 	s.actionRedirect(w, r, "/admin/users", err, "user_updated")
 }
 func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request) {
-	p := s.base(r, "All SSH Keys", "admin-keys")
+	p := s.base(r, "全SSH公開鍵", "admin-keys")
 	p.Keys, _ = s.store.AllKeys(r.Context())
 	s.render(w, http.StatusOK, p)
 }
@@ -480,7 +497,7 @@ func (s *Server) adminKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	s.actionRedirect(w, r, "/admin/keys", err, "key_deleted")
 }
 func (s *Server) adminTunnels(w http.ResponseWriter, r *http.Request) {
-	p := s.base(r, "Active Tunnels", "admin-tunnels")
+	p := s.base(r, "トンネルとセキュリティ", "admin-tunnels")
 	p.ActiveTunnels, _ = s.store.ActiveTunnels(r.Context(), nil)
 	if syncState, err := s.store.TunnelSyncState(r.Context()); err == nil {
 		p.ActiveTunnelAvailable = syncState.Available
@@ -489,7 +506,7 @@ func (s *Server) adminTunnels(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, p)
 }
 func (s *Server) adminSubdomains(w http.ResponseWriter, r *http.Request) {
-	p := s.base(r, "All Subdomains", "admin-subdomains")
+	p := s.base(r, "全サブドメイン", "admin-subdomains")
 	p.Subdomains, _ = s.store.AllSubdomains(r.Context())
 	for i := range p.Subdomains {
 		conflict, err := s.svc.DNS.HasExactRecord(r.Context(), p.Subdomains[i].Name)

@@ -158,6 +158,25 @@ func TestDesiredDisableEndpointIsRetrySafe(t *testing.T) {
 	}
 }
 
+func TestKeysPageRendersRegisteredKey(t *testing.T) {
+	s, st, token, _ := testServer(t)
+	var uid int64
+	if err := st.DB.QueryRow(`SELECT id FROM users WHERE discord_id='normal'`).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB.Exec(`INSERT INTO ssh_keys(user_id,name,public_key,fingerprint) VALUES(?,?,?,?)`, uid, "端末", "ssh-ed25519 AAAA", "SHA256:test"); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/keys", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, "SHA256:test") || !strings.Contains(body, "</html>") {
+		t.Fatalf("status=%d complete=%t fingerprint=%t", w.Code, strings.Contains(body, "</html>"), strings.Contains(body, "SHA256:test"))
+	}
+}
+
 func TestSessionAndCSRF(t *testing.T) {
 	s, _, token, csrf := testServer(t)
 	r := httptest.NewRequest(http.MethodPost, "/logout", strings.NewReader("csrf_token=bad"))
