@@ -462,7 +462,7 @@ find ssl -type f -name '*.key' -exec chmod 0640 {} +
 docker compose up --build -d
 ```
 
-Control Planeは `data/` と `pubkeys/` へ書き込み、sishは `keys/` へhost keyを書き込みます。`CONTROL_PLANE_UID` / `CONTROL_PLANE_GID` はbind mountとsecret fileを所有するdeploy userのIDへ合わせてください。Control Planeはその非root UID/GIDで動作します。sishは80/443をbindするためroot UIDで起動しますが、root filesystemはread-only、全capabilityをdropした上で`NET_BIND_SERVICE`だけを付与し、`no-new-privileges`を有効にします。`pubkeys/`と`ssl/`はread-only mountです。Certbot deploy hook installerは指定UID/GIDとmodeを生成hookへ固定します。`control-plane-` prefixはControl Plane管理用に予約し、このprefixがない既存手動鍵（数字形式のファイル名を含む）は削除・上書きしません。
+Control Planeは `data/` と `pubkeys/` へ書き込みます。sishのSSH host keyは初回起動前に `keys/` へ用意し、sishからはread-onlyで参照します。`CONTROL_PLANE_UID` / `CONTROL_PLANE_GID` はbind mountとsecret fileを所有するdeploy userのIDへ合わせてください。Control Planeはその非root UID/GIDで動作します。sishは80/443をbindするためUID 0・deploy userのGIDで起動しますが、root filesystemと全volumeはread-only、全capabilityをdropした上で`NET_BIND_SERVICE`だけを付与し、`no-new-privileges`を有効にします。Certbot deploy hook installerは指定UID/GIDとmodeを生成hookへ固定します。`control-plane-` prefixはControl Plane管理用に予約し、このprefixがない既存手動鍵（数字形式のファイル名を含む）は削除・上書きしません。
 
 ### Secret isolation
 

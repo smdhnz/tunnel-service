@@ -8,6 +8,7 @@ services:
     container_name: sish
     restart: unless-stopped
     network_mode: host
+    user: "0:${CONTROL_PLANE_GID:-1000}"
     read_only: true
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
@@ -24,7 +25,7 @@ services:
       SISH_CONTROL_PLANE_MANAGEMENT_ADDRESS: 127.0.0.1:8082
       SISH_CONTROL_PLANE_MANAGEMENT_TOKEN_FILE: /run/secrets/sish-management-token
     volumes:
-      - ./keys:/keys
+      - ./keys:/keys:ro
       - ./ssl:/ssl:ro
       - ./pubkeys:/pubkeys:ro
       - ./secrets/control-plane-internal-token:/run/secrets/control-plane-internal-token:ro
