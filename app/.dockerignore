@@ -1,3 +1,5 @@
 .git
 *.db
 coverage.out
+frontend/node_modules
+internal/web/static/dist

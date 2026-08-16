@@ -36,5 +36,10 @@ Thumbs.db
 bin/
 coverage.out
 
+# Frontend build/dependencies
+app/frontend/node_modules/
+app/frontend/*.tsbuildinfo
+app/internal/web/static/dist/
+
 # Authorized SSH public keys
 pubkeys/*.pub

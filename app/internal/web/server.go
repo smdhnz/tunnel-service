@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"log/slog"
 	"net"
@@ -30,14 +29,16 @@ import (
 	"tunnel-control-plane/internal/store"
 )
 
-//go:embed templates/*.html static/*
+// The Vite build writes hashed-free assets to static/dist before the Go binary is built.
+// static/index.html is kept as source so Go unit tests do not require Node.
+//
+//go:embed static
 var assets embed.FS
 
 type Server struct {
 	cfg                                     config.Config
 	store                                   *store.Store
 	svc                                     *service.Service
-	tpl                                     *template.Template
 	mux                                     *http.ServeMux
 	client                                  *http.Client
 	logger                                  *slog.Logger
@@ -82,45 +83,7 @@ type Page struct {
 }
 
 func New(cfg config.Config, st *store.Store, svc *service.Service, logger *slog.Logger) (*Server, error) {
-	funcs := template.FuncMap{"date": func(t time.Time) string {
-		if t.IsZero() {
-			return "-"
-		}
-		return t.UTC().Format("2006-01-02 15:04:05 UTC")
-	}, "iso": func(t time.Time) string {
-		if t.IsZero() {
-			return ""
-		}
-		return t.UTC().Format(time.RFC3339)
-	}, "securityEvent": func(event string) string {
-		labels := map[string]string{
-			"unknown_host":         "未登録ホストへのアクセス",
-			"rate_limited":         "アクセス頻度の上限超過",
-			"temporarily_blocked":  "一時的にブロック",
-			"connection_limited":   "同時接続数の上限超過",
-			"authorization_denied": "認証・認可の拒否",
-		}
-		if label, ok := labels[event]; ok {
-			return label
-		}
-		return event
-	}, "short": func(v string) string {
-		if len(v) > 42 {
-			return v[:42] + "…"
-		}
-		return v
-	}, "initial": func(v string) string {
-		r := []rune(v)
-		if len(r) == 0 {
-			return "?"
-		}
-		return string(r[0])
-	}, "eq": func(a, b any) bool { return a == b }}
-	tpl, err := template.New("layout.html").Funcs(funcs).ParseFS(assets, "templates/*.html")
-	if err != nil {
-		return nil, err
-	}
-	s := &Server{cfg: cfg, store: st, svc: svc, tpl: tpl, mux: http.NewServeMux(), client: &http.Client{Timeout: 10 * time.Second}, logger: logger,
+	s := &Server{cfg: cfg, store: st, svc: svc, mux: http.NewServeMux(), client: &http.Client{Timeout: 10 * time.Second}, logger: logger,
 		generalLimit: newRateLimiter(120, 2, 5*time.Minute), loginLimit: newRateLimiter(10, 10.0/60, 15*time.Minute), mutationLimit: newRateLimiter(30, 0.5, 10*time.Minute)}
 	s.routes()
 	return s, nil
@@ -135,32 +98,31 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /login", s.loginPage)
 	s.mux.HandleFunc("GET /auth/discord", s.oauthStart)
 	s.mux.HandleFunc("GET /auth/callback", s.oauthCallback)
-	s.mux.Handle("GET /{$}", s.auth(http.HandlerFunc(s.dashboard)))
+	s.mux.Handle("GET /api/page", s.auth(http.HandlerFunc(s.apiPage)))
+	s.mux.Handle("POST /api/action", s.auth(s.csrf(http.HandlerFunc(s.apiAction))))
+
+	for _, path := range []string{"/{$}", "/keys", "/subdomains", "/tcp-ports", "/tunnels"} {
+		s.mux.Handle("GET "+path, s.auth(http.HandlerFunc(s.spaPage)))
+	}
+	for _, path := range []string{"/admin", "/admin/users", "/admin/keys", "/admin/subdomains", "/admin/tcp-ports", "/admin/tunnels"} {
+		s.mux.Handle("GET "+path, s.auth(s.admin(http.HandlerFunc(s.spaPage))))
+	}
+
 	s.mux.Handle("POST /logout", s.auth(s.csrf(http.HandlerFunc(s.logout))))
-	s.mux.Handle("GET /keys", s.auth(http.HandlerFunc(s.keysPage)))
 	s.mux.Handle("POST /keys", s.auth(s.csrf(http.HandlerFunc(s.keyAdd))))
 	s.mux.Handle("POST /keys/{id}/enable", s.auth(s.csrf(http.HandlerFunc(s.keyEnable))))
 	s.mux.Handle("POST /keys/{id}/disable", s.auth(s.csrf(http.HandlerFunc(s.keyDisable))))
 	s.mux.Handle("POST /keys/{id}/delete", s.auth(s.csrf(http.HandlerFunc(s.keyDelete))))
-	s.mux.Handle("GET /subdomains", s.auth(http.HandlerFunc(s.subdomainsPage)))
-	s.mux.Handle("GET /tunnels", s.auth(http.HandlerFunc(s.tunnelsPage)))
 	s.mux.Handle("POST /subdomains", s.auth(s.csrf(http.HandlerFunc(s.subdomainReserve))))
 	s.mux.Handle("POST /subdomains/{id}/release", s.auth(s.csrf(http.HandlerFunc(s.subdomainRelease))))
-	s.mux.Handle("GET /tcp-ports", s.auth(http.HandlerFunc(s.tcpPortsPage)))
 	s.mux.Handle("POST /tcp-ports", s.auth(s.csrf(http.HandlerFunc(s.tcpPortReserve))))
 	s.mux.Handle("POST /tcp-ports/{id}/release", s.auth(s.csrf(http.HandlerFunc(s.tcpPortRelease))))
-	s.mux.Handle("GET /admin", s.auth(s.admin(http.HandlerFunc(s.adminHome))))
-	s.mux.Handle("GET /admin/users", s.auth(s.admin(http.HandlerFunc(s.adminUsers))))
 	s.mux.Handle("POST /admin/users/{id}/suspend", s.auth(s.admin(s.csrf(http.HandlerFunc(s.adminUserSuspend)))))
 	s.mux.Handle("POST /admin/users/{id}/unsuspend", s.auth(s.admin(s.csrf(http.HandlerFunc(s.adminUserUnsuspend)))))
-	s.mux.Handle("GET /admin/keys", s.auth(s.admin(http.HandlerFunc(s.adminKeys))))
 	s.mux.Handle("POST /admin/keys/{id}/enable", s.auth(s.admin(s.csrf(http.HandlerFunc(s.adminKeyEnable)))))
 	s.mux.Handle("POST /admin/keys/{id}/disable", s.auth(s.admin(s.csrf(http.HandlerFunc(s.adminKeyDisable)))))
 	s.mux.Handle("POST /admin/keys/{id}/revoke", s.auth(s.admin(s.csrf(http.HandlerFunc(s.adminKeyRevoke)))))
-	s.mux.Handle("GET /admin/subdomains", s.auth(s.admin(http.HandlerFunc(s.adminSubdomains))))
-	s.mux.Handle("GET /admin/tunnels", s.auth(s.admin(http.HandlerFunc(s.adminTunnels))))
 	s.mux.Handle("POST /admin/subdomains/{id}/release", s.auth(s.admin(s.csrf(http.HandlerFunc(s.adminSubdomainRelease)))))
-	s.mux.Handle("GET /admin/tcp-ports", s.auth(s.admin(http.HandlerFunc(s.adminTCPPorts))))
 	s.mux.Handle("POST /admin/tcp-ports/{id}/release", s.auth(s.admin(s.csrf(http.HandlerFunc(s.adminTCPPortRelease)))))
 }
 func (s *Server) security(next http.Handler) http.Handler {
@@ -254,7 +216,133 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	s.render(w, http.StatusOK, Page{Title: "Sign in", Page: "login"})
+	s.spaPage(w, r)
+}
+
+func (s *Server) spaPage(w http.ResponseWriter, _ *http.Request) {
+	body, err := assets.ReadFile("static/index.html")
+	if err != nil {
+		http.Error(w, "Frontend is not available", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(body)
+}
+
+// apiAction keeps all mutation routing and authorization in Go while allowing
+// the SPA to update without a document navigation.
+func (s *Server) apiAction(w http.ResponseWriter, r *http.Request) {
+	action := r.Form.Get("_action")
+	parts := strings.Split(strings.Trim(action, "/"), "/")
+	if action == "/logout" {
+		s.logout(w, r)
+		return
+	}
+	if action == "/keys" {
+		s.keyAdd(w, r)
+		return
+	}
+	if action == "/subdomains" {
+		s.subdomainReserve(w, r)
+		return
+	}
+	if action == "/tcp-ports" {
+		s.tcpPortReserve(w, r)
+		return
+	}
+	if len(parts) == 3 {
+		r.SetPathValue("id", parts[1])
+		switch {
+		case parts[0] == "keys" && parts[2] == "enable":
+			s.keyEnable(w, r)
+		case parts[0] == "keys" && parts[2] == "disable":
+			s.keyDisable(w, r)
+		case parts[0] == "keys" && parts[2] == "delete":
+			s.keyDelete(w, r)
+		case parts[0] == "subdomains" && parts[2] == "release":
+			s.subdomainRelease(w, r)
+		case parts[0] == "tcp-ports" && parts[2] == "release":
+			s.tcpPortRelease(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+		return
+	}
+	if len(parts) == 4 && parts[0] == "admin" {
+		if current(r).User.Role != "admin" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		r.SetPathValue("id", parts[2])
+		switch {
+		case parts[1] == "users" && parts[3] == "suspend":
+			s.adminUserSuspend(w, r)
+		case parts[1] == "users" && parts[3] == "unsuspend":
+			s.adminUserUnsuspend(w, r)
+		case parts[1] == "keys" && parts[3] == "enable":
+			s.adminKeyEnable(w, r)
+		case parts[1] == "keys" && parts[3] == "disable":
+			s.adminKeyDisable(w, r)
+		case parts[1] == "keys" && parts[3] == "revoke":
+			s.adminKeyRevoke(w, r)
+		case parts[1] == "subdomains" && parts[3] == "release":
+			s.adminSubdomainRelease(w, r)
+		case parts[1] == "tcp-ports" && parts[3] == "release":
+			s.adminTCPPortRelease(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+		return
+	}
+	http.NotFound(w, r)
+}
+
+// apiPage reuses the authenticated page loaders. The path is a relative URL so
+// React Router can preserve each screen's existing URL and query pagination.
+func (s *Server) apiPage(w http.ResponseWriter, r *http.Request) {
+	target := r.URL.Query().Get("path")
+	u, err := url.ParseRequestURI(target)
+	if err != nil || u.IsAbs() || u.Host != "" || !strings.HasPrefix(u.Path, "/") {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+	request := r.Clone(r.Context())
+	request.URL = u
+	request.RequestURI = target
+	switch u.Path {
+	case "/":
+		s.dashboard(w, request)
+	case "/keys":
+		s.keysPage(w, request)
+	case "/subdomains":
+		s.subdomainsPage(w, request)
+	case "/tcp-ports":
+		s.tcpPortsPage(w, request)
+	case "/tunnels":
+		s.tunnelsPage(w, request)
+	case "/admin", "/admin/users", "/admin/keys", "/admin/subdomains", "/admin/tcp-ports", "/admin/tunnels":
+		if current(r).User.Role != "admin" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		switch u.Path {
+		case "/admin":
+			s.adminHome(w, request)
+		case "/admin/users":
+			s.adminUsers(w, request)
+		case "/admin/keys":
+			s.adminKeys(w, request)
+		case "/admin/subdomains":
+			s.adminSubdomains(w, request)
+		case "/admin/tcp-ports":
+			s.adminTCPPorts(w, request)
+		case "/admin/tunnels":
+			s.adminTunnels(w, request)
+		}
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request) {
@@ -389,6 +477,10 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.DeleteSession(r.Context(), s.hash(c.Value))
 	}
 	s.clearCookie(w, s.sessionCookieName())
+	if wantsJSON(r) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
@@ -669,10 +761,11 @@ func pagination(r *http.Request, pageParameter, sizeParameter string, page, page
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, p Page) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	if err := s.tpl.ExecuteTemplate(w, "layout.html", p); err != nil {
-		s.logger.Error("template rendering failed", "error", err)
+	if err := json.NewEncoder(w).Encode(newPageDTO(p)); err != nil {
+		s.logger.Error("JSON rendering failed", "error", err)
 	}
 }
 func (s *Server) internal(w http.ResponseWriter, r *http.Request, err error) {
@@ -686,7 +779,21 @@ func (s *Server) actionRedirect(w http.ResponseWriter, r *http.Request, path str
 	} else {
 		q.Set("flash", ok)
 	}
+	if wantsJSON(r) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		status := http.StatusOK
+		if err != nil {
+			status = http.StatusUnprocessableEntity
+		}
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]string{"flash": flash(ok), "error": q.Get("error")})
+		return
+	}
 	http.Redirect(w, r, path+"?"+q.Encode(), http.StatusSeeOther)
+}
+func wantsJSON(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "application/json")
 }
 func publicError(err error) string {
 	known := []error{service.ErrInvalidKey, service.ErrKeyTooLarge, service.ErrDuplicateKey, service.ErrForbidden, service.ErrSuspended, service.ErrInvalidSubdomain, service.ErrReservedSubdomain, service.ErrDuplicateSubdomain, service.ErrDNSConflict, service.ErrDNSUnavailable, service.ErrInvalidTCPPort, service.ErrDuplicateTCPPort}

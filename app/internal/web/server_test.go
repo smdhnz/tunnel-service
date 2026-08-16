@@ -60,14 +60,14 @@ func TestOAuthStateMismatch(t *testing.T) {
 		t.Fatalf("got %d", w.Code)
 	}
 }
-func TestDashboardExplainsTCPUsageWithConfiguredSSHHost(t *testing.T) {
+func TestDashboardAPIUsesConfiguredSSHHost(t *testing.T) {
 	s, _, token, _ := testServer(t)
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/page?path=%2F", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	body := w.Body.String()
-	if w.Code != http.StatusOK || !strings.Contains(body, "MinecraftなどのTCPサービス") || !strings.Contains(body, "ssh.example.test:予約ポート") || !strings.Contains(body, "先に「TCPポート」でポートを予約") || !strings.Contains(body, "-R PUBLIC_PORT:127.0.0.1:LOCAL_PORT ssh.example.test") {
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "application/json; charset=utf-8" || !strings.Contains(body, `"SSHHost":"ssh.example.test"`) || !strings.Contains(body, `"ConnectCommand":"ssh -p 2222 -R myapp:80:localhost:3000 ssh.example.test"`) {
 		t.Fatalf("status=%d body=%s", w.Code, body)
 	}
 }
@@ -170,7 +170,7 @@ func TestDesiredDisableEndpointIsRetrySafe(t *testing.T) {
 	}
 }
 
-func TestKeysPageRendersRegisteredKey(t *testing.T) {
+func TestKeysAPIIncludesRegisteredKey(t *testing.T) {
 	s, st, token, _ := testServer(t)
 	var uid int64
 	if err := st.DB.QueryRow(`SELECT id FROM users WHERE discord_id='normal'`).Scan(&uid); err != nil {
@@ -179,13 +179,13 @@ func TestKeysPageRendersRegisteredKey(t *testing.T) {
 	if _, err := st.DB.Exec(`INSERT INTO ssh_keys(user_id,name,public_key,fingerprint) VALUES(?,?,?,?)`, uid, "端末", "ssh-ed25519 AAAA", "SHA256:test"); err != nil {
 		t.Fatal(err)
 	}
-	r := httptest.NewRequest(http.MethodGet, "/keys", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/page?path=%2Fkeys", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	body := w.Body.String()
-	if w.Code != http.StatusOK || !strings.Contains(body, "SHA256:test") || !strings.Contains(body, "</html>") {
-		t.Fatalf("status=%d complete=%t fingerprint=%t", w.Code, strings.Contains(body, "</html>"), strings.Contains(body, "SHA256:test"))
+	if w.Code != http.StatusOK || !strings.Contains(body, "SHA256:test") || !strings.Contains(body, `"Page":"keys"`) || strings.Contains(body, `"DiscordID"`) || strings.Contains(body, `"UserID"`) || strings.Contains(body, `"UpdatedAt"`) {
+		t.Fatalf("status=%d body=%s", w.Code, body)
 	}
 }
 
@@ -203,13 +203,13 @@ func TestTCPPortUserAndAdminRoutes(t *testing.T) {
 	if w.Code != http.StatusSeeOther || !strings.HasPrefix(w.Header().Get("Location"), "/tcp-ports?") {
 		t.Fatalf("reserve status=%d location=%s", w.Code, w.Header().Get("Location"))
 	}
-	r := httptest.NewRequest(http.MethodGet, "/tcp-ports", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/page?path=%2Ftcp-ports", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	body := w.Body.String()
-	if w.Code != http.StatusOK || !strings.Contains(body, "25565") || !strings.Contains(body, "/tcp-ports/") || !strings.Contains(body, `min="10000"`) || !strings.Contains(body, "10000〜65535") {
-		t.Fatalf("user page status=%d body=%s", w.Code, body)
+	if w.Code != http.StatusOK || !strings.Contains(body, `"Port":25565`) || !strings.Contains(body, `"Page":"tcp-ports"`) {
+		t.Fatalf("user API status=%d body=%s", w.Code, body)
 	}
 	var uid, id int64
 	if err := st.DB.QueryRow(`SELECT id FROM users WHERE discord_id='normal'`).Scan(&uid); err != nil {
@@ -221,12 +221,12 @@ func TestTCPPortUserAndAdminRoutes(t *testing.T) {
 	if _, err := st.DB.Exec(`UPDATE users SET role='admin' WHERE id=?`, uid); err != nil {
 		t.Fatal(err)
 	}
-	r = httptest.NewRequest(http.MethodGet, "/admin/tcp-ports", nil)
+	r = httptest.NewRequest(http.MethodGet, "/api/page?path=%2Fadmin%2Ftcp-ports", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/admin/tcp-ports/") {
-		t.Fatalf("admin page status=%d", w.Code)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"Page":"admin-tcp-ports"`) || !strings.Contains(w.Body.String(), `"Port":25565`) {
+		t.Fatalf("admin API status=%d body=%s", w.Code, w.Body.String())
 	}
 	w = post(fmt.Sprintf("/admin/tcp-ports/%d/release", id), "csrf_token="+csrf)
 	if w.Code != http.StatusSeeOther {
@@ -256,6 +256,46 @@ func TestAdminPaginationParameters(t *testing.T) {
 	page, size, offset = requestedPage(r, "page", "per_page")
 	if page != 1 || size != 10 || offset != 0 {
 		t.Fatalf("invalid fallback: page=%d size=%d offset=%d", page, size, offset)
+	}
+}
+
+func TestSPAAndJSONMutationContract(t *testing.T) {
+	s, _, token, csrf := testServer(t)
+
+	page := httptest.NewRequest(http.MethodGet, "/keys", nil)
+	page.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	pageResponse := httptest.NewRecorder()
+	s.Handler().ServeHTTP(pageResponse, page)
+	if pageResponse.Code != http.StatusOK || !strings.Contains(pageResponse.Body.String(), `<div id="root"></div>`) || !strings.Contains(pageResponse.Body.String(), `/static/dist/app.js`) {
+		t.Fatalf("SPA shell status=%d body=%s", pageResponse.Code, pageResponse.Body.String())
+	}
+
+	mutation := httptest.NewRequest(http.MethodPost, "/api/action", strings.NewReader("csrf_token="+csrf+"&_action=%2Ftcp-ports&port=25565"))
+	mutation.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mutation.Header.Set("Accept", "application/json")
+	mutation.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	mutationResponse := httptest.NewRecorder()
+	s.Handler().ServeHTTP(mutationResponse, mutation)
+	if mutationResponse.Code != http.StatusOK || mutationResponse.Header().Get("Location") != "" || !strings.Contains(mutationResponse.Body.String(), `"flash":"TCPポートを予約しました"`) {
+		t.Fatalf("JSON mutation status=%d location=%q body=%s", mutationResponse.Code, mutationResponse.Header().Get("Location"), mutationResponse.Body.String())
+	}
+
+	adminAction := httptest.NewRequest(http.MethodPost, "/api/action", strings.NewReader("csrf_token="+csrf+"&_action=%2Fadmin%2Fusers%2F1%2Fsuspend"))
+	adminAction.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	adminAction.Header.Set("Accept", "application/json")
+	adminAction.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	adminResponse := httptest.NewRecorder()
+	s.Handler().ServeHTTP(adminResponse, adminAction)
+	if adminResponse.Code != http.StatusForbidden {
+		t.Fatalf("non-admin API action status=%d", adminResponse.Code)
+	}
+
+	bad := httptest.NewRequest(http.MethodGet, "/api/page?path=https%3A%2F%2Fevil.example%2F", nil)
+	bad.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	badResponse := httptest.NewRecorder()
+	s.Handler().ServeHTTP(badResponse, bad)
+	if badResponse.Code != http.StatusBadRequest {
+		t.Fatalf("absolute API path status=%d", badResponse.Code)
 	}
 }
 
