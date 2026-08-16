@@ -178,6 +178,21 @@ func TestNormalizeSubdomain(t *testing.T) {
 		}
 	}
 }
+func TestTunnelSubdomainCanOnlyBeReservedByAdmin(t *testing.T) {
+	ctx := context.Background()
+	svc, st, userID, _ := testService(t, dnsMock{})
+	if _, err := svc.ReserveSubdomain(ctx, userID, "tunnel", ""); !errors.Is(err, ErrReservedSubdomain) {
+		t.Fatalf("user reserved tunnel: %v", err)
+	}
+	admin, err := st.UpsertDiscordUser(ctx, "admin", "admin", "Admin", "admin@example.test", "", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.ReserveSubdomain(ctx, admin.ID, "tunnel", ""); err != nil {
+		t.Fatalf("admin could not reserve tunnel: %v", err)
+	}
+}
+
 func TestSubdomainReservationChecks(t *testing.T) {
 	ctx := context.Background()
 	svc, _, u1, u2 := testService(t, dnsMock{})

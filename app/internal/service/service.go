@@ -223,9 +223,21 @@ func (s *Service) ReserveSubdomain(ctx context.Context, uid int64, raw, ip strin
 	if err := s.ensureActive(ctx, uid); err != nil {
 		return 0, err
 	}
-	name, err := NormalizeSubdomain(raw)
-	if err != nil {
-		return 0, err
+	name := strings.ToLower(strings.TrimSpace(raw))
+	if name == "tunnel" {
+		u, err := s.Store.UserByID(ctx, uid)
+		if err != nil {
+			return 0, err
+		}
+		if u.Role != "admin" {
+			return 0, ErrReservedSubdomain
+		}
+	} else {
+		var err error
+		name, err = NormalizeSubdomain(name)
+		if err != nil {
+			return 0, err
+		}
 	}
 	existing, err := s.Store.AllSubdomains(ctx)
 	if err != nil {
