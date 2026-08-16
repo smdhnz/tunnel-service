@@ -384,6 +384,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	p := s.base(r, "概要", "dashboard")
 	p.Keys, _ = s.store.KeysByUser(r.Context(), p.User.ID)
 	p.Subdomains, _ = s.store.SubdomainsByUser(r.Context(), p.User.ID)
+	p.TCPPorts, _ = s.store.TCPPortsByUser(r.Context(), p.User.ID)
 	p.Audit, _ = s.store.RecentAuditByUser(r.Context(), p.User.ID, 8)
 	p.ActiveTunnels, _ = s.store.ActiveTunnels(r.Context(), &p.User.ID)
 	if syncState, err := s.store.TunnelSyncState(r.Context()); err == nil {

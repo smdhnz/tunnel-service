@@ -60,6 +60,18 @@ func TestOAuthStateMismatch(t *testing.T) {
 		t.Fatalf("got %d", w.Code)
 	}
 }
+func TestDashboardExplainsTCPUsageWithConfiguredSSHHost(t *testing.T) {
+	s, _, token, _ := testServer(t)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, "MinecraftなどのTCPサービス") || !strings.Contains(body, "ssh.example.test:予約ポート") || !strings.Contains(body, "先に「TCPポート」でポートを予約") {
+		t.Fatalf("status=%d body=%s", w.Code, body)
+	}
+}
+
 func TestUnauthenticatedAccessRedirects(t *testing.T) {
 	s, _, _, _ := testServer(t)
 	w := httptest.NewRecorder()
