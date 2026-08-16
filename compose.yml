@@ -48,6 +48,8 @@ services:
       - --https
       - --https-certificate-directory=/ssl
       - --load-templates-directory=/templates/*
+      - --abuse-request-burst=2000
+      - --abuse-request-rate=50
 
   control-plane-tunnel:
     build:

@@ -1,19 +1,20 @@
 diff --git a/cmd/sish.go b/cmd/sish.go
-index 7fb1656..cd7e8f1 100644
+index 7fb1656..a5a1805 100644
 --- a/cmd/sish.go
 +++ b/cmd/sish.go
-@@ -141,6 +141,10 @@ func init() {
+@@ -141,6 +141,11 @@ func init() {
  	rootCmd.PersistentFlags().IntP("log-to-file-max-backups", "", 3, "The maxium number of rotated logs files to keep")
  	rootCmd.PersistentFlags().IntP("log-to-file-max-age", "", 28, "The maxium number of days to store log output in a file")
  	rootCmd.PersistentFlags().IntP("service-console-max-content-length", "", -1, "The max content length before we stop reading the response body")
 +	rootCmd.PersistentFlags().IntP("abuse-http-max-connections", "", 50, "Maximum concurrent public HTTP/TCP connections per source IP")
 +	rootCmd.PersistentFlags().IntP("abuse-ssh-max-connections", "", 20, "Maximum concurrent SSH connections per source IP")
 +	rootCmd.PersistentFlags().IntP("abuse-accept-burst", "", 60, "Accepted public connection burst per source IP")
-+	rootCmd.PersistentFlags().IntP("abuse-request-burst", "", 120, "HTTP request burst per source IP")
++	rootCmd.PersistentFlags().IntP("abuse-request-burst", "", 2000, "HTTP request burst per source IP")
++	rootCmd.PersistentFlags().IntP("abuse-request-rate", "", 50, "HTTP requests replenished per second per source IP")
  
  	rootCmd.PersistentFlags().DurationP("debug-interval", "", 2*time.Second, "Duration to wait between each debug loop output if debug is true")
  	rootCmd.PersistentFlags().DurationP("idle-connection-timeout", "", 5*time.Second, "Duration to wait for activity before closing a connection for all reads and writes")
-@@ -154,6 +158,9 @@ func init() {
+@@ -154,6 +159,9 @@ func init() {
  	rootCmd.PersistentFlags().DurationP("authentication-key-request-timeout", "", 5*time.Second, "Duration to wait for a response from the authentication key request")
  	rootCmd.PersistentFlags().StringP("authentication-password-request-url", "", "", "A url to validate passwords for password-based authentication.\nsish will make an HTTP POST request to this URL with a JSON body containing\nthe provided password, username, and ip address. E.g.:\n{\"password\": string, \"user\": string, \"remote_addr\": string}\nA response with status code 200 indicates approval of the password")
  	rootCmd.PersistentFlags().DurationP("authentication-password-request-timeout", "", 5*time.Second, "Duration to wait for a response from the authentication password request")
@@ -24,14 +25,14 @@ index 7fb1656..cd7e8f1 100644
  
  // initConfig initializes the configuration and loads needed
 diff --git a/httpmuxer/httpmuxer.go b/httpmuxer/httpmuxer.go
-index d825405..6817517 100644
+index d825405..3e574c2 100644
 --- a/httpmuxer/httpmuxer.go
 +++ b/httpmuxer/httpmuxer.go
 @@ -46,6 +46,12 @@ func Start(state *utils.State) {
  	}
  
  	r.Use(func(c *gin.Context) {
-+		release, allowed := utils.AbuseAllow(c.Request.RemoteAddr)
++		release, allowed := utils.AbuseAllow(c.Request.RemoteAddr, c.Request.Host)
 +		if !allowed {
 +			c.AbortWithStatus(http.StatusTooManyRequests)
 +			return
@@ -115,7 +116,7 @@ index d825405..6817517 100644
  	defer func() {
  		err := httpListener.Close()
 diff --git a/sshmuxer/requests.go b/sshmuxer/requests.go
-index 1af49c4..667b83a 100644
+index 1af49c4..5c3da4a 100644
 --- a/sshmuxer/requests.go
 +++ b/sshmuxer/requests.go
 @@ -181,6 +181,19 @@ func handleRemoteForward(newRequest *ssh.Request, sshConn *utils.SSHConnection,
@@ -245,10 +246,10 @@ index 4d41b26..da031af 100644
  
 diff --git a/utils/controlplane.go b/utils/controlplane.go
 new file mode 100644
-index 0000000..a0ce5c9
+index 0000000..a0a26d8
 --- /dev/null
 +++ b/utils/controlplane.go
-@@ -0,0 +1,519 @@
+@@ -0,0 +1,523 @@
 +package utils
 +
 +import (
@@ -720,9 +721,13 @@ index 0000000..a0ce5c9
 +
 +// RequestAllow provides a separate request-rate bucket; connection accounting
 +// is exclusively performed by AbuseListener.
-+func AbuseAllow(addr string) (func(), bool) {
++func AbuseAllow(addr, host string) (func(), bool) {
 +	ip := remoteIP(addr)
-+	key := "request:" + ip
++	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
++	if h, _, err := net.SplitHostPort(host); err == nil {
++		host = h
++	}
++	key := "request:" + ip + ":" + host
 +	now := time.Now()
 +	abuseState.Lock()
 +	e := abuseState.m[key]
@@ -735,7 +740,7 @@ index 0000000..a0ce5c9
 +		countSecurity("temporarily_blocked", 1)
 +		return func() {}, false
 +	}
-+	e.tokens = min(float64(max(1, viper.GetInt("abuse-request-burst"))), e.tokens+now.Sub(e.updated).Seconds()*2)
++	e.tokens = min(float64(max(1, viper.GetInt("abuse-request-burst"))), e.tokens+now.Sub(e.updated).Seconds()*float64(max(1, viper.GetInt("abuse-request-rate"))))
 +	e.updated = now
 +	if e.tokens < 1 {
 +		e.violations++
@@ -918,10 +923,10 @@ index 0000000..5edf19e
 +func (c *addrConn) RemoteAddr() net.Addr { return c.remote }
 diff --git a/utils/controlplane_test.go b/utils/controlplane_test.go
 new file mode 100644
-index 0000000..2dbb16e
+index 0000000..8dee57a
 --- /dev/null
 +++ b/utils/controlplane_test.go
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,79 @@
 +package utils
 +
 +import (
@@ -982,7 +987,7 @@ index 0000000..2dbb16e
 +	abuseState.Unlock()
 +	allowed := 0
 +	for i := 0; i < 100; i++ {
-+		release, ok := AbuseAllow("192.0.2.1:1234")
++		release, ok := AbuseAllow("192.0.2.1:1234", "app.example.test")
 +		if ok {
 +			allowed++
 +			release()
@@ -991,10 +996,13 @@ index 0000000..2dbb16e
 +	if allowed != 100 {
 +		t.Fatalf("burst allowed=%d", allowed)
 +	}
++	for i := 0; i < 120; i++ {
++		_, _ = AbuseAllow("192.0.2.1:1234", "other.example.test")
++	}
 +	abuseState.Lock()
 +	n := len(abuseState.m)
 +	abuseState.Unlock()
-+	if n != 1 {
-+		t.Fatalf("entries=%d", n)
++	if n != 2 {
++		t.Fatalf("host buckets not isolated: entries=%d", n)
 +	}
 +}
