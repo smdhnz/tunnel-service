@@ -649,16 +649,24 @@ func (s *Store) TunnelSyncState(ctx context.Context) (model.TunnelSyncState, err
 	return v, err
 }
 func (s *Store) ActiveTunnels(ctx context.Context, userID *int64) ([]model.ActiveTunnel, error) {
+	out, _, err := s.ActiveTunnelsPage(ctx, userID, 0, 0)
+	return out, err
+}
+func (s *Store) ActiveTunnelsPage(ctx context.Context, userID *int64, limit, offset int) ([]model.ActiveTunnel, bool, error) {
 	q := `SELECT t.id,t.user_id,t.ssh_key_id,COALESCE(u.username,'[system]'),COALESCE(k.name,sk.name,'[revoked]'),t.protocol,t.hostname,t.tcp_port,t.source_ip,t.status,t.generation,t.event_sequence,t.connected_at,COALESCE(t.disconnected_at,'') FROM active_tunnels t LEFT JOIN users u ON u.id=t.user_id LEFT JOIN ssh_keys k ON k.id=t.ssh_key_id LEFT JOIN system_ssh_keys sk ON sk.id=-t.ssh_key_id AND t.user_id=0 WHERE t.status!='disconnected'`
 	args := []any{}
 	if userID != nil {
 		q += " AND t.user_id=?"
 		args = append(args, *userID)
 	}
-	q += " ORDER BY t.connected_at DESC"
+	q += " ORDER BY t.connected_at DESC,t.id DESC"
+	if limit > 0 {
+		q += " LIMIT ? OFFSET ?"
+		args = append(args, limit+1, offset)
+	}
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []model.ActiveTunnel
@@ -666,13 +674,20 @@ func (s *Store) ActiveTunnels(ctx context.Context, userID *int64) ([]model.Activ
 		var t model.ActiveTunnel
 		var c, d string
 		if err = rows.Scan(&t.ID, &t.UserID, &t.SSHKeyID, &t.Owner, &t.KeyName, &t.Protocol, &t.Hostname, &t.TCPPort, &t.SourceIP, &t.Status, &t.Generation, &t.EventSequence, &c, &d); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		t.ConnectedAt = parseTime(c)
 		t.DisconnectedAt = parseTime(d)
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := limit > 0 && len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
 }
 
 func (s *Store) PendingOutbox(ctx context.Context, limit int) ([]model.OutboxItem, error) {
@@ -713,6 +728,12 @@ func (s *Store) PendingOutboxCount(ctx context.Context) (int, error) {
 	err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM outbox WHERE completed_at IS NULL`).Scan(&n)
 	return n, err
 }
+func (s *Store) CleanupSecurityTelemetry(ctx context.Context, now time.Time) error {
+	cutoff := now.UTC().Add(-90 * 24 * time.Hour)
+	_, metricsErr := s.DB.ExecContext(ctx, `DELETE FROM security_telemetry WHERE bucket_start<?`, cutoff.Format(time.RFC3339))
+	_, batchesErr := s.DB.ExecContext(ctx, `DELETE FROM telemetry_batches WHERE received_at<?`, cutoff.Format("2006-01-02 15:04:05"))
+	return errors.Join(metricsErr, batchesErr)
+}
 func (s *Store) AddSecurityTelemetryBatch(ctx context.Context, eventID string, events map[string]int64) error {
 	if eventID == "" || len(events) == 0 {
 		return errors.New("invalid telemetry batch")
@@ -730,7 +751,15 @@ func (s *Store) AddSecurityTelemetryBatch(ctx context.Context, eventID string, e
 	if n == 0 {
 		return tx.Commit()
 	}
-	bucket := time.Now().UTC().Truncate(time.Minute).Format(time.RFC3339)
+	now := time.Now().UTC()
+	cutoff := now.Add(-90 * 24 * time.Hour)
+	if _, err = tx.ExecContext(ctx, `DELETE FROM security_telemetry WHERE bucket_start<?`, cutoff.Format(time.RFC3339)); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM telemetry_batches WHERE received_at<?`, cutoff.Format("2006-01-02 15:04:05")); err != nil {
+		return err
+	}
+	bucket := now.Truncate(time.Minute).Format(time.RFC3339)
 	for event, count := range events {
 		if event == "" || count < 1 {
 			return errors.New("invalid telemetry")
@@ -745,9 +774,13 @@ func (s *Store) AddSecurityTelemetry(ctx context.Context, event string, count in
 	return s.AddSecurityTelemetryBatch(ctx, fmt.Sprintf("legacy-%d", time.Now().UnixNano()), map[string]int64{event: count})
 }
 func (s *Store) RecentSecurityTelemetry(ctx context.Context, limit int) ([]model.SecurityMetric, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT bucket_start,event_type,count FROM security_telemetry ORDER BY bucket_start DESC,event_type LIMIT ?`, limit)
+	out, _, err := s.SecurityTelemetryPage(ctx, limit, 0)
+	return out, err
+}
+func (s *Store) SecurityTelemetryPage(ctx context.Context, limit, offset int) ([]model.SecurityMetric, bool, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT bucket_start,event_type,count FROM security_telemetry ORDER BY bucket_start DESC,event_type LIMIT ? OFFSET ?`, limit+1, offset)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []model.SecurityMetric
@@ -755,10 +788,17 @@ func (s *Store) RecentSecurityTelemetry(ctx context.Context, limit int) ([]model
 		var m model.SecurityMetric
 		var b string
 		if err = rows.Scan(&b, &m.EventType, &m.Count); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		m.BucketStart = parseTime(b)
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
 }

@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   sish:
     build:
@@ -7,6 +13,7 @@ services:
     image: tunnel-service-sish:local
     container_name: sish
     restart: unless-stopped
+    logging: *default-logging
     network_mode: host
     user: "0:${CONTROL_PLANE_GID:-1000}"
     read_only: true
@@ -59,6 +66,7 @@ services:
         TUNNEL_GID: ${CONTROL_PLANE_GID:-1000}
     container_name: tunnel-control-plane-tunnel
     restart: unless-stopped
+    logging: *default-logging
     network_mode: host
     read_only: true
     cap_drop: [ALL]
@@ -79,6 +87,7 @@ services:
     build: ./app
     container_name: tunnel-control-plane
     restart: unless-stopped
+    logging: *default-logging
     network_mode: host
     user: "${CONTROL_PLANE_UID:-1000}:${CONTROL_PLANE_GID:-1000}"
     read_only: true

@@ -65,6 +65,10 @@ func main() {
 		logger.Error("expired authentication cleanup failed", "error", err)
 		os.Exit(1)
 	}
+	if err = st.CleanupSecurityTelemetry(context.Background(), time.Now()); err != nil {
+		logger.Error("expired security telemetry cleanup failed", "error", err)
+		os.Exit(1)
+	}
 	app, err := web.New(cfg, st, svc, logger)
 	if err != nil {
 		logger.Error("web startup failed", "error", err)
@@ -76,6 +80,20 @@ func main() {
 	defer workerCancel()
 	go (&service.OutboxWorker{Store: st, Keys: keyWriter, Tunnels: sish, Logger: logger, Interval: time.Second, Domain: cfg.TunnelDomain}).Run(workerCtx)
 	go (&service.TunnelSynchronizer{Store: st, Provider: sish, Logger: logger, Interval: 5 * time.Second}).Run(workerCtx)
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-workerCtx.Done():
+				return
+			case now := <-ticker.C:
+				if cleanupErr := st.CleanupSecurityTelemetry(workerCtx, now); cleanupErr != nil {
+					logger.Error("expired security telemetry cleanup failed", "error", cleanupErr)
+				}
+			}
+		}
+	}()
 	go func() {
 		logger.Info("control plane listening", "address", cfg.Addr)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

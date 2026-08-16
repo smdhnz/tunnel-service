@@ -39,6 +39,40 @@ func seedIdentity(t *testing.T, s *Store, discord, fp, domain string) (int64, in
 	}
 	return u.ID, kid
 }
+func TestSecurityTelemetryRetentionAndPagination(t *testing.T) {
+	ctx := context.Background()
+	s := hardeningStore(t)
+	old := time.Now().UTC().Add(-91 * 24 * time.Hour).Format(time.RFC3339)
+	recent := time.Now().UTC().Add(-time.Hour).Truncate(time.Minute).Format(time.RFC3339)
+	if _, err := s.DB.Exec(`INSERT INTO security_telemetry(bucket_start,event_type,count) VALUES(?,?,?), (?,?,?)`, old, "unknown_host", 1, recent, "rate_limited", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO telemetry_batches(event_id,received_at) VALUES(?,?)`, "old-batch", old); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddSecurityTelemetryBatch(ctx, "new-batch", map[string]int64{"unknown_host": 3}); err != nil {
+		t.Fatal(err)
+	}
+	var oldMetrics, oldBatches int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM security_telemetry WHERE bucket_start=?`, old).Scan(&oldMetrics); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRow(`SELECT count(*) FROM telemetry_batches WHERE event_id='old-batch'`).Scan(&oldBatches); err != nil {
+		t.Fatal(err)
+	}
+	if oldMetrics != 0 || oldBatches != 0 {
+		t.Fatalf("expired telemetry remains: metrics=%d batches=%d", oldMetrics, oldBatches)
+	}
+	first, more, err := s.SecurityTelemetryPage(ctx, 1, 0)
+	if err != nil || len(first) != 1 || !more {
+		t.Fatalf("first page=%+v more=%v err=%v", first, more, err)
+	}
+	second, more, err := s.SecurityTelemetryPage(ctx, 1, 1)
+	if err != nil || len(second) != 1 || more {
+		t.Fatalf("second page=%+v more=%v err=%v", second, more, err)
+	}
+}
+
 func TestTCPPortRangeConstraint(t *testing.T) {
 	s := hardeningStore(t)
 	uid, _ := seedIdentity(t, s, "range", "SHA256:range", "")

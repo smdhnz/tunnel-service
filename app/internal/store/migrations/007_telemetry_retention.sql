@@ -1,0 +1,2 @@
+CREATE INDEX security_telemetry_bucket_start ON security_telemetry(bucket_start);
+CREATE INDEX telemetry_batches_received_at ON telemetry_batches(received_at);

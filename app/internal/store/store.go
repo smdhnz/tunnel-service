@@ -104,9 +104,19 @@ func (s *Store) UserByID(ctx context.Context, id int64) (*model.User, error) {
 	return scanUser(s.DB.QueryRowContext(ctx, "SELECT "+userCols()+" FROM users WHERE id=?", id))
 }
 func (s *Store) Users(ctx context.Context) ([]model.User, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT u.id,u.discord_id,u.username,u.display_name,u.email,u.avatar_url,u.role,u.status,u.created_at,u.updated_at,(SELECT count(*) FROM ssh_keys k WHERE k.user_id=u.id),(SELECT count(*) FROM subdomains d WHERE d.user_id=u.id),(SELECT count(*) FROM tcp_ports p WHERE p.user_id=u.id) FROM users u ORDER BY u.created_at DESC`)
+	users, _, err := s.UsersPage(ctx, 0, 0)
+	return users, err
+}
+func (s *Store) UsersPage(ctx context.Context, limit, offset int) ([]model.User, bool, error) {
+	q := `SELECT u.id,u.discord_id,u.username,u.display_name,u.email,u.avatar_url,u.role,u.status,u.created_at,u.updated_at,(SELECT count(*) FROM ssh_keys k WHERE k.user_id=u.id),(SELECT count(*) FROM subdomains d WHERE d.user_id=u.id),(SELECT count(*) FROM tcp_ports p WHERE p.user_id=u.id) FROM users u ORDER BY u.created_at DESC,u.id DESC`
+	args := []any{}
+	if limit > 0 {
+		q += ` LIMIT ? OFFSET ?`
+		args = append(args, limit+1, offset)
+	}
+	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []model.User
@@ -114,13 +124,20 @@ func (s *Store) Users(ctx context.Context) ([]model.User, error) {
 		var u model.User
 		var c, a string
 		if err = rows.Scan(&u.ID, &u.DiscordID, &u.Username, &u.DisplayName, &u.Email, &u.AvatarURL, &u.Role, &u.Status, &c, &a, &u.SSHKeyCount, &u.SubdomainCount, &u.TCPPortCount); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		u.CreatedAt = parseTime(c)
 		u.UpdatedAt = parseTime(a)
 		out = append(out, u)
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := limit > 0 && len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
 }
 func (s *Store) SetUserStatus(ctx context.Context, id int64, status string) error {
 	r, err := s.DB.ExecContext(ctx, "UPDATE users SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", status, id)
@@ -193,28 +210,44 @@ func (s *Store) KeysByUser(ctx context.Context, uid int64) ([]model.SSHKey, erro
 	return s.keys(ctx, "WHERE k.user_id=?", uid)
 }
 func (s *Store) AllKeys(ctx context.Context) ([]model.SSHKey, error) { return s.keys(ctx, "", nil) }
+func (s *Store) AllKeysPage(ctx context.Context, limit, offset int) ([]model.SSHKey, bool, error) {
+	return s.keysPage(ctx, "", nil, limit, offset)
+}
 func (s *Store) keys(ctx context.Context, where string, arg any) ([]model.SSHKey, error) {
-	q := `SELECT k.id,k.user_id,u.username,k.name,k.public_key,k.fingerprint,k.enabled,k.created_at,k.updated_at FROM ssh_keys k JOIN users u ON u.id=k.user_id ` + where + ` ORDER BY k.created_at DESC`
-	var rows *sql.Rows
-	var err error
-	if where == "" {
-		rows, err = s.DB.QueryContext(ctx, q)
-	} else {
-		rows, err = s.DB.QueryContext(ctx, q, arg)
+	out, _, err := s.keysPage(ctx, where, arg, 0, 0)
+	return out, err
+}
+func (s *Store) keysPage(ctx context.Context, where string, arg any, limit, offset int) ([]model.SSHKey, bool, error) {
+	q := `SELECT k.id,k.user_id,u.username,k.name,k.public_key,k.fingerprint,k.enabled,k.created_at,k.updated_at FROM ssh_keys k JOIN users u ON u.id=k.user_id ` + where + ` ORDER BY k.created_at DESC,k.id DESC`
+	args := []any{}
+	if where != "" {
+		args = append(args, arg)
 	}
+	if limit > 0 {
+		q += ` LIMIT ? OFFSET ?`
+		args = append(args, limit+1, offset)
+	}
+	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []model.SSHKey
 	for rows.Next() {
 		k, e := scanKey(rows)
 		if e != nil {
-			return nil, e
+			return nil, false, e
 		}
 		out = append(out, k)
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := limit > 0 && len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
 }
 func (s *Store) Key(ctx context.Context, id int64) (model.SSHKey, error) {
 	return scanKey(s.DB.QueryRowContext(ctx, `SELECT k.id,k.user_id,u.username,k.name,k.public_key,k.fingerprint,k.enabled,k.created_at,k.updated_at FROM ssh_keys k JOIN users u ON u.id=k.user_id WHERE k.id=?`, id))
@@ -257,17 +290,26 @@ func (s *Store) SubdomainsByUser(ctx context.Context, uid int64) ([]model.Subdom
 func (s *Store) AllSubdomains(ctx context.Context) ([]model.Subdomain, error) {
 	return s.subdomains(ctx, "", nil)
 }
+func (s *Store) AllSubdomainsPage(ctx context.Context, limit, offset int) ([]model.Subdomain, bool, error) {
+	return s.subdomainsPage(ctx, "", nil, limit, offset)
+}
 func (s *Store) subdomains(ctx context.Context, where string, arg any) ([]model.Subdomain, error) {
-	q := `SELECT d.id,d.user_id,u.username,d.name,d.status,d.created_at,d.updated_at FROM subdomains d JOIN users u ON u.id=d.user_id ` + where + ` ORDER BY d.created_at DESC`
-	var rows *sql.Rows
-	var err error
-	if where == "" {
-		rows, err = s.DB.QueryContext(ctx, q)
-	} else {
-		rows, err = s.DB.QueryContext(ctx, q, arg)
+	out, _, err := s.subdomainsPage(ctx, where, arg, 0, 0)
+	return out, err
+}
+func (s *Store) subdomainsPage(ctx context.Context, where string, arg any, limit, offset int) ([]model.Subdomain, bool, error) {
+	q := `SELECT d.id,d.user_id,u.username,d.name,d.status,d.created_at,d.updated_at FROM subdomains d JOIN users u ON u.id=d.user_id ` + where + ` ORDER BY d.created_at DESC,d.id DESC`
+	args := []any{}
+	if where != "" {
+		args = append(args, arg)
 	}
+	if limit > 0 {
+		q += ` LIMIT ? OFFSET ?`
+		args = append(args, limit+1, offset)
+	}
+	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []model.Subdomain
@@ -275,13 +317,20 @@ func (s *Store) subdomains(ctx context.Context, where string, arg any) ([]model.
 		var d model.Subdomain
 		var c, u string
 		if err = rows.Scan(&d.ID, &d.UserID, &d.Owner, &d.Name, &d.Status, &c, &u); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		d.CreatedAt = parseTime(c)
 		d.UpdatedAt = parseTime(u)
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := limit > 0 && len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
 }
 func (s *Store) Subdomain(ctx context.Context, id int64) (model.Subdomain, error) {
 	var d model.Subdomain
@@ -309,17 +358,26 @@ func (s *Store) TCPPortsByUser(ctx context.Context, uid int64) ([]model.TCPPort,
 func (s *Store) AllTCPPorts(ctx context.Context) ([]model.TCPPort, error) {
 	return s.tcpPorts(ctx, "", nil)
 }
+func (s *Store) AllTCPPortsPage(ctx context.Context, limit, offset int) ([]model.TCPPort, bool, error) {
+	return s.tcpPortsPage(ctx, "", nil, limit, offset)
+}
 func (s *Store) tcpPorts(ctx context.Context, where string, arg any) ([]model.TCPPort, error) {
+	out, _, err := s.tcpPortsPage(ctx, where, arg, 0, 0)
+	return out, err
+}
+func (s *Store) tcpPortsPage(ctx context.Context, where string, arg any, limit, offset int) ([]model.TCPPort, bool, error) {
 	q := `SELECT p.id,p.user_id,u.username,p.port,p.created_at,p.updated_at FROM tcp_ports p JOIN users u ON u.id=p.user_id ` + where + ` ORDER BY p.port`
-	var rows *sql.Rows
-	var err error
-	if where == "" {
-		rows, err = s.DB.QueryContext(ctx, q)
-	} else {
-		rows, err = s.DB.QueryContext(ctx, q, arg)
+	args := []any{}
+	if where != "" {
+		args = append(args, arg)
 	}
+	if limit > 0 {
+		q += ` LIMIT ? OFFSET ?`
+		args = append(args, limit+1, offset)
+	}
+	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []model.TCPPort
@@ -327,12 +385,19 @@ func (s *Store) tcpPorts(ctx context.Context, where string, arg any) ([]model.TC
 		var p model.TCPPort
 		var c, u string
 		if err = rows.Scan(&p.ID, &p.UserID, &p.Owner, &p.Port, &c, &u); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		p.CreatedAt, p.UpdatedAt = parseTime(c), parseTime(u)
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := limit > 0 && len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
 }
 func (s *Store) TCPPort(ctx context.Context, id int64) (model.TCPPort, error) {
 	var p model.TCPPort

@@ -18,6 +18,10 @@ grep -Fq 'CONTROL_PLANE_HOST: console.example.test' "$output"
 grep -Fq 'DISCORD_REDIRECT_URI: https://console.example.test/auth/callback' "$output"
 grep -Fq 'REMOTE_LABEL: console' "$output"
 grep -Fq 'CONTROL_PLANE_ADDR: 127.0.0.1:8080' "$output"
+if [[ "$(grep -c 'max-size: 10m' "$output")" -ne 4 ]] || [[ "$(grep -c 'max-file: "3"' "$output")" -ne 4 ]]; then
+  printf 'compose test: log rotation is not applied to every service\n' >&2
+  exit 1
+fi
 if grep -Eq '^[[:space:]]+(ports|expose):' "$output"; then
   printf 'compose test: internal ports are exposed\n' >&2
   exit 1

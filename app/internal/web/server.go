@@ -50,6 +50,12 @@ const oauthCookie = "oauth_state"
 const secureSessionCookie = "__Host-tunnel_session"
 const secureOAuthCookie = "__Host-oauth_state"
 
+const adminPageSize = 50
+
+type Pagination struct {
+	Page                 int
+	PreviousURL, NextURL string
+}
 type Page struct {
 	Title, Page, CSRF, Flash, Error, TunnelDomain, SSHHost, ConnectCommand string
 	SSHPort                                                                int
@@ -62,6 +68,7 @@ type Page struct {
 	ActiveTunnels                                                          []model.ActiveTunnel
 	SecurityMetrics                                                        []model.SecurityMetric
 	Stats                                                                  model.Stats
+	Pagination, TunnelPagination, SecurityPagination                       Pagination
 	ActiveTunnelAvailable                                                  bool
 }
 
@@ -489,7 +496,14 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
 	p := s.base(r, "ユーザー管理", "admin-users")
-	p.Users, _ = s.store.Users(r.Context())
+	page, offset := requestedPage(r, "page")
+	var more bool
+	var err error
+	if p.Users, more, err = s.store.UsersPage(r.Context(), adminPageSize, offset); err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	p.Pagination = pagination(r, "page", page, more)
 	s.render(w, http.StatusOK, p)
 }
 func (s *Server) adminUserSuspend(w http.ResponseWriter, r *http.Request) { s.adminUserSet(w, r, true) }
@@ -507,7 +521,14 @@ func (s *Server) adminUserSet(w http.ResponseWriter, r *http.Request, suspended 
 }
 func (s *Server) adminKeys(w http.ResponseWriter, r *http.Request) {
 	p := s.base(r, "全SSH公開鍵", "admin-keys")
-	p.Keys, _ = s.store.AllKeys(r.Context())
+	page, offset := requestedPage(r, "page")
+	var more bool
+	var err error
+	if p.Keys, more, err = s.store.AllKeysPage(r.Context(), adminPageSize, offset); err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	p.Pagination = pagination(r, "page", page, more)
 	s.render(w, http.StatusOK, p)
 }
 func (s *Server) adminKeyEnable(w http.ResponseWriter, r *http.Request)  { s.keySet(w, r, true, true) }
@@ -523,16 +544,35 @@ func (s *Server) adminKeyRevoke(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) adminTunnels(w http.ResponseWriter, r *http.Request) {
 	p := s.base(r, "トンネルとセキュリティ", "admin-tunnels")
-	p.ActiveTunnels, _ = s.store.ActiveTunnels(r.Context(), nil)
+	tunnelPage, tunnelOffset := requestedPage(r, "tunnel_page")
+	securityPage, securityOffset := requestedPage(r, "security_page")
+	var more bool
+	var err error
+	if p.ActiveTunnels, more, err = s.store.ActiveTunnelsPage(r.Context(), nil, adminPageSize, tunnelOffset); err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	p.TunnelPagination = pagination(r, "tunnel_page", tunnelPage, more)
 	if syncState, err := s.store.TunnelSyncState(r.Context()); err == nil {
 		p.ActiveTunnelAvailable = syncState.Available
 	}
-	p.SecurityMetrics, _ = s.store.RecentSecurityTelemetry(r.Context(), 40)
+	if p.SecurityMetrics, more, err = s.store.SecurityTelemetryPage(r.Context(), adminPageSize, securityOffset); err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	p.SecurityPagination = pagination(r, "security_page", securityPage, more)
 	s.render(w, http.StatusOK, p)
 }
 func (s *Server) adminSubdomains(w http.ResponseWriter, r *http.Request) {
 	p := s.base(r, "全サブドメイン", "admin-subdomains")
-	p.Subdomains, _ = s.store.AllSubdomains(r.Context())
+	page, offset := requestedPage(r, "page")
+	var more bool
+	var err error
+	if p.Subdomains, more, err = s.store.AllSubdomainsPage(r.Context(), adminPageSize, offset); err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	p.Pagination = pagination(r, "page", page, more)
 	for i := range p.Subdomains {
 		conflict, err := s.svc.DNS.HasExactRecord(r.Context(), p.Subdomains[i].Name)
 		switch {
@@ -548,7 +588,14 @@ func (s *Server) adminSubdomains(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) adminTCPPorts(w http.ResponseWriter, r *http.Request) {
 	p := s.base(r, "全TCPポート", "admin-tcp-ports")
-	p.TCPPorts, _ = s.store.AllTCPPorts(r.Context())
+	page, offset := requestedPage(r, "page")
+	var more bool
+	var err error
+	if p.TCPPorts, more, err = s.store.AllTCPPortsPage(r.Context(), adminPageSize, offset); err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	p.Pagination = pagination(r, "page", page, more)
 	s.render(w, http.StatusOK, p)
 }
 func (s *Server) adminTCPPortRelease(w http.ResponseWriter, r *http.Request) {
@@ -568,6 +615,36 @@ func (s *Server) adminSubdomainRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.svc.ReleaseSubdomain(r.Context(), current(r).User.ID, true, id, sourceIP(r))
 	s.actionRedirect(w, r, "/admin/subdomains", err, "subdomain_released")
+}
+
+func requestedPage(r *http.Request, parameter string) (int, int) {
+	page, err := strconv.Atoi(r.URL.Query().Get(parameter))
+	if err != nil || page < 1 || page > 1_000_000 {
+		page = 1
+	}
+	return page, (page - 1) * adminPageSize
+}
+func pagination(r *http.Request, parameter string, page int, hasMore bool) Pagination {
+	p := Pagination{Page: page}
+	pageURL := func(n int) string {
+		q := r.URL.Query()
+		if n == 1 {
+			q.Del(parameter)
+		} else {
+			q.Set(parameter, strconv.Itoa(n))
+		}
+		if encoded := q.Encode(); encoded != "" {
+			return r.URL.Path + "?" + encoded
+		}
+		return r.URL.Path
+	}
+	if page > 1 {
+		p.PreviousURL = pageURL(page - 1)
+	}
+	if hasMore {
+		p.NextURL = pageURL(page + 1)
+	}
+	return p
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, p Page) {
