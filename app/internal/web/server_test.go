@@ -67,7 +67,7 @@ func TestDashboardExplainsTCPUsageWithConfiguredSSHHost(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	body := w.Body.String()
-	if w.Code != http.StatusOK || !strings.Contains(body, "MinecraftなどのTCPサービス") || !strings.Contains(body, "ssh.example.test:予約ポート") || !strings.Contains(body, "先に「TCPポート」でポートを予約") {
+	if w.Code != http.StatusOK || !strings.Contains(body, "MinecraftなどのTCPサービス") || !strings.Contains(body, "ssh.example.test:予約ポート") || !strings.Contains(body, "先に「TCPポート」でポートを予約") || !strings.Contains(body, "-R PUBLIC_PORT:127.0.0.1:LOCAL_PORT ssh.example.test") {
 		t.Fatalf("status=%d body=%s", w.Code, body)
 	}
 }
