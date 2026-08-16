@@ -50,11 +50,14 @@ services:
       - --load-templates-directory=/templates/*
 
   control-plane-tunnel:
-    build: ./tunnel-client
+    build:
+      context: ./tunnel-client
+      args:
+        TUNNEL_UID: ${CONTROL_PLANE_UID:-1000}
+        TUNNEL_GID: ${CONTROL_PLANE_GID:-1000}
     container_name: tunnel-control-plane-tunnel
     restart: unless-stopped
     network_mode: host
-    user: "${CONTROL_PLANE_UID:-1000}:${CONTROL_PLANE_GID:-1000}"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
