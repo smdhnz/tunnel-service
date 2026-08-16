@@ -28,6 +28,8 @@ var (
 	ErrDuplicateSubdomain = errors.New("このサブドメインは既に予約されています")
 	ErrDNSConflict        = errors.New("既存のDNSレコードと競合しています")
 	ErrDNSUnavailable     = errors.New("DNS競合を確認できないため予約できません")
+	ErrInvalidTCPPort     = errors.New("TCPポートは10000〜65535の整数で入力してください")
+	ErrDuplicateTCPPort   = errors.New("このTCPポートは既に予約されています")
 )
 
 const MaxPublicKeyBytes = 16 * 1024
@@ -83,6 +85,22 @@ func NormalizeSubdomain(raw string) (string, error) {
 		}
 	}
 	return name, nil
+}
+func ParseTCPPort(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, ErrInvalidTCPPort
+	}
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return 0, ErrInvalidTCPPort
+		}
+	}
+	port, err := strconv.ParseUint(raw, 10, 16)
+	if err != nil || port < model.PublicTCPPortMin || port > model.PublicTCPPortMax {
+		return 0, ErrInvalidTCPPort
+	}
+	return int(port), nil
 }
 func cleanName(name string) error {
 	name = strings.TrimSpace(name)
@@ -258,6 +276,38 @@ func (s *Service) ReserveSubdomain(ctx context.Context, uid int64, raw, ip strin
 	}
 	return id, nil
 }
+func (s *Service) ReserveTCPPort(ctx context.Context, uid int64, raw, ip string) (int64, error) {
+	if err := s.ensureActive(ctx, uid); err != nil {
+		return 0, err
+	}
+	port, err := ParseTCPPort(raw)
+	if err != nil {
+		return 0, err
+	}
+	id, err := s.Store.InsertTCPPortAtomic(ctx, uid, port, store.AuditEntry{Actor: &uid, Target: &uid, Action: "tcp_port.reserve", ResourceType: "tcp_port", SourceIP: ip})
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return 0, ErrDuplicateTCPPort
+		}
+		return 0, err
+	}
+	return id, nil
+}
+func (s *Service) ReleaseTCPPort(ctx context.Context, actor int64, admin bool, id int64, ip string) error {
+	p, err := s.Store.TCPPort(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !admin && p.UserID != actor {
+		return ErrForbidden
+	}
+	action := "tcp_port.release"
+	if admin {
+		action = "admin.tcp_port.force_release"
+	}
+	return s.Store.DeleteTCPPortAtomic(ctx, id, p.Port, store.AuditEntry{Actor: &actor, Target: &p.UserID, Action: action, ResourceType: "tcp_port", ResourceID: strconv.FormatInt(id, 10), SourceIP: ip})
+}
+
 func (s *Service) ReleaseSubdomain(ctx context.Context, actor int64, admin bool, id int64, ip string) error {
 	d, err := s.Store.Subdomain(ctx, id)
 	if err != nil {

@@ -206,6 +206,59 @@ func (s *Store) InsertSubdomainAtomic(ctx context.Context, uid int64, name strin
 	}
 	return id, tx.Commit()
 }
+func (s *Store) InsertTCPPortAtomic(ctx context.Context, uid int64, port int, a AuditEntry) (int64, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	r, err := tx.ExecContext(ctx, `INSERT INTO tcp_ports(user_id,port) SELECT id,? FROM users WHERE id=? AND status='active'`, port, uid)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := r.RowsAffected()
+	if n != 1 {
+		return 0, sql.ErrNoRows
+	}
+	id, err := r.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if _, err = nextGeneration(ctx, tx); err != nil {
+		return 0, err
+	}
+	a.ResourceID = fmt.Sprint(id)
+	if err = insertAudit(ctx, tx, a); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
+}
+func (s *Store) DeleteTCPPortAtomic(ctx context.Context, id int64, port int, a AuditEntry) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	g, err := nextGeneration(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE active_tunnels SET status='disconnecting',updated_at=CURRENT_TIMESTAMP WHERE protocol='tcp' AND tcp_port=? AND status IN ('active','stale')`, port); err != nil {
+		return err
+	}
+	if err = insertOutbox(ctx, tx, OutboxEvent{Kind: "tunnel.disconnect_port", DedupeKey: fmt.Sprintf("generation:%d:disconnect:port:%d", g, port), Payload: map[string]any{"port": port, "generation": g}}); err != nil {
+		return err
+	}
+	if err = insertAudit(ctx, tx, a); err != nil {
+		return err
+	}
+	r, err := tx.ExecContext(ctx, "DELETE FROM tcp_ports WHERE id=? AND port=?", id, port)
+	if err = requireAffected(r, err); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DeleteSubdomainAtomic(ctx context.Context, id int64, name string, a AuditEntry) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -350,7 +403,16 @@ func (s *Store) AuthorizeBind(ctx context.Context, fingerprint, label, protocol 
 			}
 			return model.SSHKey{}, 0, err
 		}
-	} else if protocol != "tcp" || port < 1 || port > 65535 {
+	} else if protocol == "tcp" && port >= model.PublicTCPPortMin && port <= model.PublicTCPPortMax {
+		var n int
+		err = tx.QueryRowContext(ctx, `SELECT count(*) FROM tcp_ports WHERE user_id=? AND port=?`, k.UserID, port).Scan(&n)
+		if err != nil || n != 1 {
+			if err == nil {
+				err = sql.ErrNoRows
+			}
+			return model.SSHKey{}, 0, err
+		}
+	} else {
 		return model.SSHKey{}, 0, sql.ErrNoRows
 	}
 	g, err := currentGenerationTx(ctx, tx)
@@ -401,8 +463,10 @@ func (s *Store) ApplyTunnelConnect(ctx context.Context, t model.ActiveTunnel, la
 		} else {
 			err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id JOIN subdomains d ON d.user_id=u.id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active' AND d.name=?`, t.SSHKeyID, t.UserID, label).Scan(&valid)
 		}
+	} else if t.Protocol == "tcp" && t.TCPPort >= model.PublicTCPPortMin && t.TCPPort <= model.PublicTCPPortMax {
+		err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id JOIN tcp_ports p ON p.user_id=u.id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active' AND p.port=?`, t.SSHKeyID, t.UserID, t.TCPPort).Scan(&valid)
 	} else {
-		err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active'`, t.SSHKeyID, t.UserID).Scan(&valid)
+		return sql.ErrNoRows
 	}
 	if err != nil {
 		return err
@@ -531,8 +595,10 @@ func (s *Store) ReconcileActiveSnapshot(ctx context.Context, snapshot model.Tunn
 			} else {
 				err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id JOIN subdomains d ON d.user_id=u.id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active' AND d.name=? AND d.status='reserved'`, t.SSHKeyID, t.UserID, label).Scan(&valid)
 			}
+		} else if t.Protocol == "tcp" && t.TCPPort >= model.PublicTCPPortMin && t.TCPPort <= model.PublicTCPPortMax {
+			err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id JOIN tcp_ports p ON p.user_id=u.id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active' AND p.port=?`, t.SSHKeyID, t.UserID, t.TCPPort).Scan(&valid)
 		} else {
-			err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active'`, t.SSHKeyID, t.UserID).Scan(&valid)
+			continue
 		}
 		if err != nil {
 			return err

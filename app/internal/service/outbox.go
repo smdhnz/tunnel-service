@@ -17,6 +17,7 @@ type TunnelController interface {
 	DisconnectKey(context.Context, int64, int64) error
 	DisconnectUser(context.Context, int64, int64) error
 	DisconnectHost(context.Context, string, int64) error
+	DisconnectPort(context.Context, int, int64) error
 }
 
 type OutboxWorker struct {
@@ -73,6 +74,7 @@ func (w *OutboxWorker) process(ctx context.Context, item model.OutboxItem) error
 		UserID     int64  `json:"user_id"`
 		Generation int64  `json:"generation"`
 		Hostname   string `json:"hostname"`
+		Port       int    `json:"port"`
 	}
 	if err := json.Unmarshal([]byte(item.Payload), &p); err != nil {
 		return err
@@ -109,6 +111,8 @@ func (w *OutboxWorker) process(ctx context.Context, item model.OutboxItem) error
 		return w.Tunnels.DisconnectKey(ctx, p.KeyID, p.Generation)
 	case "tunnel.disconnect_user":
 		return w.Tunnels.DisconnectUser(ctx, p.UserID, p.Generation)
+	case "tunnel.disconnect_port":
+		return w.Tunnels.DisconnectPort(ctx, p.Port, p.Generation)
 	case "tunnel.disconnect_host":
 		host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(p.Hostname), "."))
 		domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(w.Domain), "."))

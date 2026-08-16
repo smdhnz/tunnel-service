@@ -246,10 +246,10 @@ index 4d41b26..da031af 100644
  
 diff --git a/utils/controlplane.go b/utils/controlplane.go
 new file mode 100644
-index 0000000..a0a26d8
+index 0000000..0f8373c
 --- /dev/null
 +++ b/utils/controlplane.go
-@@ -0,0 +1,523 @@
+@@ -0,0 +1,532 @@
 +package utils
 +
 +import (
@@ -280,6 +280,7 @@ index 0000000..a0a26d8
 +	KeyID      int64  `json:"key_id"`
 +	Generation int64  `json:"generation"`
 +	Hostname   string `json:"hostname"`
++	Port       int    `json:"port"`
 +}
 +type managedTunnel struct {
 +	ID          string    `json:"id"`
@@ -299,11 +300,12 @@ index 0000000..a0a26d8
 +	tunnels                 map[string]*managedTunnel
 +	keyBarrier, userBarrier map[int64]int64
 +	hostBarrier             map[string]int64
++	portBarrier             map[int]int64
 +	sequence                int64
 +}
 +
 +var controlSourceID = randomID()
-+var controlRegistry = tunnelRegistry{tunnels: map[string]*managedTunnel{}, keyBarrier: map[int64]int64{}, userBarrier: map[int64]int64{}, hostBarrier: map[string]int64{}}
++var controlRegistry = tunnelRegistry{tunnels: map[string]*managedTunnel{}, keyBarrier: map[int64]int64{}, userBarrier: map[int64]int64{}, hostBarrier: map[string]int64{}, portBarrier: map[int]int64{}}
 +var securityCounters = struct {
 +	sync.Mutex
 +	values map[string]int64
@@ -396,7 +398,7 @@ index 0000000..a0a26d8
 +}
 +func nextSequenceLocked() int64 { controlRegistry.sequence++; return controlRegistry.sequence }
 +func barredLocked(p ControlPlanePrincipal) bool {
-+	return controlRegistry.keyBarrier[p.KeyID] >= p.Generation || controlRegistry.userBarrier[p.UserID] >= p.Generation || (p.Hostname != "" && controlRegistry.hostBarrier[canonicalHostname(p.Hostname)] >= p.Generation)
++	return controlRegistry.keyBarrier[p.KeyID] >= p.Generation || controlRegistry.userBarrier[p.UserID] >= p.Generation || (p.Hostname != "" && controlRegistry.hostBarrier[canonicalHostname(p.Hostname)] >= p.Generation) || (p.Port != 0 && controlRegistry.portBarrier[p.Port] >= p.Generation)
 +}
 +
 +func ControlPlaneAuthorize(conn *SSHConnection, protocol, hostname string, port uint32) (ControlPlanePrincipal, error) {
@@ -409,6 +411,9 @@ index 0000000..a0a26d8
 +	err := cpRequest(context.Background(), http.MethodPost, "/v1/authorize", q, &p)
 +	if err == nil && ((p.UserID > 0 && p.KeyID > 0) || (p.UserID == 0 && p.KeyID < 0)) && p.Generation > 0 {
 +		p.Hostname = canonicalHostname(p.Hostname)
++		if protocol == "tcp" {
++			p.Port = int(port)
++		}
 +		controlRegistry.RLock()
 +		blocked := barredLocked(p)
 +		controlRegistry.RUnlock()
@@ -534,6 +539,7 @@ index 0000000..a0a26d8
 +		UserID     int64  `json:"user_id"`
 +		Generation int64  `json:"generation"`
 +		Hostname   string `json:"hostname"`
++		Port       int    `json:"port"`
 +		TunnelID   string `json:"tunnel_id"`
 +	}
 +	d := json.NewDecoder(r.Body)
@@ -553,9 +559,12 @@ index 0000000..a0a26d8
 +	if q.Hostname != "" && q.Generation > controlRegistry.hostBarrier[q.Hostname] {
 +		controlRegistry.hostBarrier[q.Hostname] = q.Generation
 +	}
++	if q.Port > 0 && q.Generation > controlRegistry.portBarrier[q.Port] {
++		controlRegistry.portBarrier[q.Port] = q.Generation
++	}
 +	cleanups := []func(){}
 +	for _, t := range controlRegistry.tunnels {
-+		if (q.TunnelID != "" && t.ID == q.TunnelID) || (q.KeyID > 0 && t.KeyID == q.KeyID) || (q.UserID > 0 && t.UserID == q.UserID) || (q.Hostname != "" && t.Hostname == q.Hostname) {
++		if (q.TunnelID != "" && t.ID == q.TunnelID) || (q.KeyID > 0 && t.KeyID == q.KeyID) || (q.UserID > 0 && t.UserID == q.UserID) || (q.Hostname != "" && t.Hostname == q.Hostname) || (q.Port > 0 && t.Protocol == "tcp" && t.Port == q.Port && t.Generation <= q.Generation) {
 +			cleanups = append(cleanups, t.cleanup)
 +		}
 +	}
@@ -775,10 +784,10 @@ index 0000000..a0a26d8
 +func ParseUintPort(v uint32) string { return strconv.FormatUint(uint64(v), 10) }
 diff --git a/utils/controlplane_race_test.go b/utils/controlplane_race_test.go
 new file mode 100644
-index 0000000..5edf19e
+index 0000000..71c4dc6
 --- /dev/null
 +++ b/utils/controlplane_race_test.go
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,166 @@
 +package utils
 +
 +import (
@@ -800,6 +809,7 @@ index 0000000..5edf19e
 +	controlRegistry.keyBarrier = map[int64]int64{}
 +	controlRegistry.userBarrier = map[int64]int64{}
 +	controlRegistry.hostBarrier = map[string]int64{}
++	controlRegistry.portBarrier = map[int]int64{}
 +	controlRegistry.sequence = 0
 +}
 +func TestDisconnectBarrierRejectsLateAuthorizedGeneration(t *testing.T) {
@@ -831,6 +841,29 @@ index 0000000..5edf19e
 +	disconnectManaged(w, r)
 +	if a.Load() != 1 || b.Load() != 0 {
 +		t.Fatalf("cleanup a=%d b=%d", a.Load(), b.Load())
++	}
++}
++func TestDelayedDisconnectPortPreservesRereservedGeneration(t *testing.T) {
++	resetControlRegistry()
++	var old, newer, other atomic.Int32
++	controlRegistry.Lock()
++	controlRegistry.tunnels["old"] = &managedTunnel{ID: "old", Protocol: "tcp", Port: 25565, Generation: 1, cleanup: func() { old.Add(1) }}
++	controlRegistry.tunnels["equal"] = &managedTunnel{ID: "equal", Protocol: "tcp", Port: 25565, Generation: 2, cleanup: func() { old.Add(1) }}
++	controlRegistry.tunnels["newer"] = &managedTunnel{ID: "newer", Protocol: "tcp", Port: 25565, Generation: 3, cleanup: func() { newer.Add(1) }}
++	controlRegistry.tunnels["other"] = &managedTunnel{ID: "other", Protocol: "tcp", Port: 25566, Generation: 1, cleanup: func() { other.Add(1) }}
++	controlRegistry.Unlock()
++	r := httptest.NewRequest("POST", "/v1/disconnect", bytes.NewBufferString(`{"port":25565,"generation":2}`))
++	w := httptest.NewRecorder()
++	disconnectManaged(w, r)
++	if w.Code != 204 || old.Load() != 2 || newer.Load() != 0 || other.Load() != 0 {
++		t.Fatalf("status=%d cleanup old=%d newer=%d other=%d", w.Code, old.Load(), newer.Load(), other.Load())
++	}
++	controlRegistry.RLock()
++	lateOld := barredLocked(ControlPlanePrincipal{UserID: 1, KeyID: 2, Port: 25565, Generation: 2})
++	rereserved := barredLocked(ControlPlanePrincipal{UserID: 3, KeyID: 4, Port: 25565, Generation: 3})
++	controlRegistry.RUnlock()
++	if !lateOld || rereserved {
++		t.Fatalf("lateOld=%v rereserved=%v", lateOld, rereserved)
 +	}
 +}
 +func TestDisconnectAndLateRegistrationBarrierRace(t *testing.T) {

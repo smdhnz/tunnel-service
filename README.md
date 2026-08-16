@@ -5,18 +5,35 @@
 - 公開トンネル: `*.${TUNNEL_DOMAIN}`
 - SSH endpoint: `${SSH_HOST}:2222`
 - 管理画面: `https://${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}`
-- 通常トンネル: active user・enabled SSH key・所有する予約済みsubdomainを毎bind時に照合
+- 通常トンネル: active user・enabled SSH key・所有する予約済みsubdomain / TCPポート予約を毎bind時に照合（未予約TCPポートは拒否）
 - 管理画面トンネル: 専用system key・system subdomainを起動時に自動登録
 
 `audit` / `required`の意味は変更していません。通常運用は`required`です。
 
 ## 公開portとsecurity boundary
 
-| Port       | 用途         |
-| ---------- | ------------ |
-| `80/tcp`   | HTTP tunnel  |
-| `443/tcp`  | HTTPS tunnel |
-| `2222/tcp` | sish SSH     |
+| Port              | 用途         |
+| ----------------- | ------------ |
+| `80/tcp`          | HTTP tunnel  |
+| `443/tcp`         | HTTPS tunnel |
+| `2222/tcp`        | sish SSH     |
+| `10000-65535/tcp` | TCP tunnel   |
+
+VPSのファイアウォールとクラウド側のセキュリティ設定では、TCPトンネル専用範囲`10000-65535/tcp`を一度だけ許可する必要があります。以後は管理画面で予約するポートごとの開放は不要です。このリポジトリはVPSやクラウドの設定を自動変更しません。
+
+UbuntuでUFWを利用する場合は、管理SSHを遮断しないようSSHポートを先に許可してから設定します。管理SSHが22番以外なら`22`を実際のポートへ置き換えます。
+
+```bash
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 2222/tcp
+sudo ufw allow 10000:65535/tcp
+sudo ufw enable
+sudo ufw status numbered
+```
+
+KAGOYA Cloud VPSでセキュリティグループを適用すると、登録した許可以外は拒否されます。コントロールパネルでTCP `10000-65535`を範囲指定できない場合は、そのセキュリティグループを外し、上記UFWで制御します。セキュリティグループを外す前にUFWの管理SSH・HTTP・HTTPS・sish SSH・TCP専用範囲が許可済みであることを確認してください。
 
 Control Plane `8080`、内部認可API `8081`、sish management API `8082`はhost networkのloopbackでのみ使用します。Composeは`8080`を`ports` / `expose`しません。
 
@@ -273,6 +290,15 @@ ssh -N -i ~/.ssh/id_ed25519 -p 2222 \
 
 未予約label、他user所有label、`ssh`、`CONTROL_PLANE_SUBDOMAIN`、`_acme-challenge`、既存固定予約語は拒否されます。
 
+TCPトンネルは管理画面で専用範囲（10000〜65535）の対象ポートを先に予約します。Minecraft Java Edition（既定25565）の例:
+
+```bash
+ssh -N -i ~/.ssh/id_ed25519 -p 2222 \
+  -R 25565:127.0.0.1:25565 "$SSH_HOST"
+```
+
+未予約または他ユーザー所有のTCPポートは拒否されます。VPS / クラウド側では上記の専用範囲を一度だけ許可すれば、以後ポートごとの開放は不要です。
+
 # 更新
 
 先に下記「Backup / Restore」のbackup手順を完了してから更新します。
@@ -283,7 +309,10 @@ git pull --ff-only
 ./scripts/setup.sh
 docker compose config --quiet
 docker compose up --build -d
+docker compose ps
 ```
+
+TCPトンネルを初めて有効化する更新では、上記「公開portとsecurity boundary」のUFWおよびKAGOYAセキュリティグループ設定も実施します。SQLite migrationはControl Plane起動時に自動適用されます。
 
 sish再作成時、接続中のuser tunnelは再接続が必要です。管理トンネルは`restart: unless-stopped`で再接続します。
 

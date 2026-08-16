@@ -2,11 +2,16 @@ package model
 
 import "time"
 
+const (
+	PublicTCPPortMin = 10000
+	PublicTCPPortMax = 65535
+)
+
 type User struct {
 	ID                                                               int64
 	DiscordID, Username, DisplayName, Email, AvatarURL, Role, Status string
 	CreatedAt, UpdatedAt                                             time.Time
-	SSHKeyCount, SubdomainCount                                      int
+	SSHKeyCount, SubdomainCount, TCPPortCount                        int
 }
 
 type SSHKey struct {
@@ -20,6 +25,13 @@ type Subdomain struct {
 	ID, UserID                       int64
 	Owner, Name, Status, DNSConflict string
 	CreatedAt, UpdatedAt             time.Time
+}
+
+type TCPPort struct {
+	ID, UserID           int64
+	Owner                string
+	Port                 int
+	CreatedAt, UpdatedAt time.Time
 }
 
 type AuditLog struct {
@@ -72,4 +84,4 @@ type OutboxItem struct {
 	AvailableAt              time.Time
 }
 
-type Stats struct{ Users, ActiveUsers, SSHKeys, Subdomains, SuspendedUsers, ActiveTunnels int }
+type Stats struct{ Users, ActiveUsers, SSHKeys, Subdomains, TCPPorts, SuspendedUsers, ActiveTunnels int }

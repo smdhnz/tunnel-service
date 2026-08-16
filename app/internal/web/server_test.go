@@ -177,6 +177,55 @@ func TestKeysPageRendersRegisteredKey(t *testing.T) {
 	}
 }
 
+func TestTCPPortUserAndAdminRoutes(t *testing.T) {
+	s, st, token, csrf := testServer(t)
+	post := func(path, form string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		return w
+	}
+	w := post("/tcp-ports", "csrf_token="+csrf+"&port=25565")
+	if w.Code != http.StatusSeeOther || !strings.HasPrefix(w.Header().Get("Location"), "/tcp-ports?") {
+		t.Fatalf("reserve status=%d location=%s", w.Code, w.Header().Get("Location"))
+	}
+	r := httptest.NewRequest(http.MethodGet, "/tcp-ports", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, "25565") || !strings.Contains(body, "/tcp-ports/") || !strings.Contains(body, `min="10000"`) || !strings.Contains(body, "10000〜65535") {
+		t.Fatalf("user page status=%d body=%s", w.Code, body)
+	}
+	var uid, id int64
+	if err := st.DB.QueryRow(`SELECT id FROM users WHERE discord_id='normal'`).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB.QueryRow(`SELECT id FROM tcp_ports WHERE port=25565`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB.Exec(`UPDATE users SET role='admin' WHERE id=?`, uid); err != nil {
+		t.Fatal(err)
+	}
+	r = httptest.NewRequest(http.MethodGet, "/admin/tcp-ports", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/admin/tcp-ports/") {
+		t.Fatalf("admin page status=%d", w.Code)
+	}
+	w = post(fmt.Sprintf("/admin/tcp-ports/%d/release", id), "csrf_token="+csrf)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("force release status=%d", w.Code)
+	}
+	var count int
+	if err := st.DB.QueryRow(`SELECT count(*) FROM tcp_ports WHERE id=?`, id).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("port count=%d err=%v", count, err)
+	}
+}
+
 func TestSessionAndCSRF(t *testing.T) {
 	s, _, token, csrf := testServer(t)
 	r := httptest.NewRequest(http.MethodPost, "/logout", strings.NewReader("csrf_token=bad"))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -38,6 +39,21 @@ func seedIdentity(t *testing.T, s *Store, discord, fp, domain string) (int64, in
 	}
 	return u.ID, kid
 }
+func TestTCPPortRangeConstraint(t *testing.T) {
+	s := hardeningStore(t)
+	uid, _ := seedIdentity(t, s, "range", "SHA256:range", "")
+	for _, port := range []int{model.PublicTCPPortMin, model.PublicTCPPortMax} {
+		if _, err := s.DB.Exec(`INSERT INTO tcp_ports(user_id,port) VALUES(?,?)`, uid, port); err != nil {
+			t.Fatalf("valid port %d rejected: %v", port, err)
+		}
+	}
+	for _, port := range []int{model.PublicTCPPortMin - 1, model.PublicTCPPortMax + 1} {
+		if _, err := s.DB.Exec(`INSERT INTO tcp_ports(user_id,port) VALUES(?,?)`, uid, port); err == nil {
+			t.Fatalf("out-of-range port %d accepted", port)
+		}
+	}
+}
+
 func TestAuthorizeBindOwnershipEnabledAndActive(t *testing.T) {
 	ctx := context.Background()
 	s := hardeningStore(t)
@@ -47,7 +63,15 @@ func TestAuthorizeBindOwnershipEnabledAndActive(t *testing.T) {
 	if err != nil || generation < 1 || k.ID != kid || k.UserID != uid {
 		t.Fatalf("valid rejected: %+v %v", k, err)
 	}
-	for name, fn := range map[string]func(){"manual": func() { _, _, err = s.AuthorizeBind(ctx, "SHA256:manual", "mine", "http", 80) }, "other owner": func() { _, _, err = s.AuthorizeBind(ctx, "SHA256:alice", "other", "https", 443) }, "invalid tcp": func() { _, _, err = s.AuthorizeBind(ctx, "SHA256:alice", "", "tcp", 0) }} {
+	for _, port := range []int{model.PublicTCPPortMin, 25565, model.PublicTCPPortMax} {
+		if _, err = s.DB.Exec(`INSERT INTO tcp_ports(user_id,port) VALUES(?,?)`, uid, port); err != nil {
+			t.Fatal(err)
+		}
+		if tcpKey, _, tcpErr := s.AuthorizeBind(ctx, "SHA256:alice", "", "tcp", port); tcpErr != nil || tcpKey.UserID != uid {
+			t.Fatalf("reserved TCP %d rejected: key=%+v err=%v", port, tcpKey, tcpErr)
+		}
+	}
+	for name, fn := range map[string]func(){"manual": func() { _, _, err = s.AuthorizeBind(ctx, "SHA256:manual", "mine", "http", 80) }, "other owner": func() { _, _, err = s.AuthorizeBind(ctx, "SHA256:alice", "other", "https", 443) }, "below tcp range": func() { _, _, err = s.AuthorizeBind(ctx, "SHA256:alice", "", "tcp", model.PublicTCPPortMin-1) }, "above tcp range": func() { _, _, err = s.AuthorizeBind(ctx, "SHA256:alice", "", "tcp", model.PublicTCPPortMax+1) }, "unreserved tcp": func() { _, _, err = s.AuthorizeBind(ctx, "SHA256:alice", "", "tcp", 25566) }, "other owner tcp": func() { _, _, err = s.AuthorizeBind(ctx, "SHA256:bob", "", "tcp", 25565) }} {
 		t.Run(name, func(t *testing.T) {
 			fn()
 			if !errors.Is(err, sql.ErrNoRows) {
@@ -106,6 +130,91 @@ func modelTunnel(id string, u, k int64, h string, at time.Time) model.ActiveTunn
 	}
 	return model.ActiveTunnel{ID: id, UserID: u, SSHKeyID: k, Protocol: "http", Hostname: h, TCPPort: 80, Generation: 1, EventSequence: seq, ConnectedAt: at}
 }
+
+func TestTCPConnectAndSnapshotEnforcePublicRange(t *testing.T) {
+	ctx := context.Background()
+	s := hardeningStore(t)
+	uid, keyID := seedIdentity(t, s, "tcp-range", "SHA256:tcp-range", "")
+	if _, err := s.DB.Exec(`INSERT INTO tcp_ports(user_id,port) VALUES(?,?)`, uid, model.PublicTCPPortMin); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, port := range []int{model.PublicTCPPortMin - 1, model.PublicTCPPortMax + 1} {
+		tunnel := model.ActiveTunnel{ID: fmt.Sprintf("connect-%d", port), UserID: uid, SSHKeyID: keyID, Protocol: "tcp", TCPPort: port, Generation: 1, EventSequence: 1, ConnectedAt: now}
+		if err := s.ApplyTunnelConnect(ctx, tunnel, "", "tcp-range-source", fmt.Sprintf("event-%d", port)); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("out-of-range connect %d: %v", port, err)
+		}
+	}
+	valid := model.ActiveTunnel{ID: "snapshot-valid", UserID: uid, SSHKeyID: keyID, Protocol: "tcp", TCPPort: model.PublicTCPPortMin, Generation: 1, ConnectedAt: now}
+	snapshot := model.TunnelSnapshot{SourceID: "tcp-range-source", Sequence: 2, Tunnels: []model.ActiveTunnel{
+		valid,
+		{ID: "snapshot-below", UserID: uid, SSHKeyID: keyID, Protocol: "tcp", TCPPort: model.PublicTCPPortMin - 1, Generation: 1, ConnectedAt: now},
+		{ID: "snapshot-above", UserID: uid, SSHKeyID: keyID, Protocol: "tcp", TCPPort: model.PublicTCPPortMax + 1, Generation: 1, ConnectedAt: now},
+	}}
+	if err := s.ReconcileActiveSnapshot(ctx, snapshot, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ActiveTunnels(ctx, nil)
+	if err != nil || len(got) != 1 || got[0].ID != valid.ID {
+		t.Fatalf("out-of-range snapshot entries not ignored: tunnels=%+v err=%v", got, err)
+	}
+}
+
+func TestTCPPortDelayedReleaseDoesNotInvalidateRereservation(t *testing.T) {
+	ctx := context.Background()
+	s := hardeningStore(t)
+	oldUID, oldKeyID := seedIdentity(t, s, "old-tcp", "old-tcp-fp", "")
+	newUID, newKeyID := seedIdentity(t, s, "new-tcp", "new-tcp-fp", "")
+	id, err := s.InsertTCPPortAtomic(ctx, oldUID, 25565, AuditEntry{Actor: &oldUID, Target: &oldUID, Action: "reserve", ResourceType: "tcp_port"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, oldGeneration, err := s.AuthorizeBind(ctx, "old-tcp-fp", "", "tcp", 25565)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTunnel := model.ActiveTunnel{ID: "old-tcp-tunnel", UserID: oldUID, SSHKeyID: oldKeyID, Protocol: "tcp", TCPPort: 25565, Generation: oldGeneration, EventSequence: 1, ConnectedAt: time.Now()}
+	if err = s.ApplyTunnelConnect(ctx, oldTunnel, "", "tcp-source", "old-tcp-connect"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DeleteTCPPortAtomic(ctx, id, 25565, AuditEntry{Actor: &oldUID, Target: &oldUID, Action: "release", ResourceType: "tcp_port"}); err != nil {
+		t.Fatal(err)
+	}
+	var kind string
+	var disconnectGeneration int64
+	if err = s.DB.QueryRow(`SELECT kind,json_extract(payload,'$.generation') FROM outbox WHERE completed_at IS NULL`).Scan(&kind, &disconnectGeneration); err != nil || kind != "tunnel.disconnect_port" {
+		t.Fatalf("outbox kind=%q generation=%d err=%v", kind, disconnectGeneration, err)
+	}
+	if _, err = s.InsertTCPPortAtomic(ctx, newUID, 25565, AuditEntry{Actor: &newUID, Target: &newUID, Action: "reserve", ResourceType: "tcp_port"}); err != nil {
+		t.Fatal(err)
+	}
+	_, newGeneration, err := s.AuthorizeBind(ctx, "new-tcp-fp", "", "tcp", 25565)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newGeneration <= disconnectGeneration {
+		t.Fatalf("re-reservation generation=%d disconnect generation=%d", newGeneration, disconnectGeneration)
+	}
+	if err = s.ApplyTunnelConnect(ctx, model.ActiveTunnel{ID: "late-old-tcp", UserID: oldUID, SSHKeyID: oldKeyID, Protocol: "tcp", TCPPort: 25565, Generation: oldGeneration, EventSequence: 2, ConnectedAt: time.Now()}, "", "tcp-source", "late-old-tcp-connect"); err == nil {
+		t.Fatal("late old TCP registration accepted after release")
+	}
+	newTunnel := model.ActiveTunnel{ID: "new-tcp-tunnel", UserID: newUID, SSHKeyID: newKeyID, Protocol: "tcp", TCPPort: 25565, Generation: newGeneration, EventSequence: 3, ConnectedAt: time.Now()}
+	if err = s.ApplyTunnelConnect(ctx, newTunnel, "", "tcp-source", "new-tcp-connect"); err != nil {
+		t.Fatalf("new generation TCP registration rejected: %v", err)
+	}
+	got, err := s.ActiveTunnels(ctx, nil)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("tunnels=%+v err=%v", got, err)
+	}
+	statuses := map[string]string{}
+	for _, tunnel := range got {
+		statuses[tunnel.ID] = tunnel.Status
+	}
+	if statuses[oldTunnel.ID] != "disconnecting" || statuses[newTunnel.ID] != "active" {
+		t.Fatalf("statuses=%v", statuses)
+	}
+}
+
 func TestMutationRollsBackWhenAuditInsertFails(t *testing.T) {
 	ctx := context.Background()
 	s := hardeningStore(t)

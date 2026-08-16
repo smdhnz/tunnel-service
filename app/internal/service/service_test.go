@@ -211,6 +211,67 @@ func TestSubdomainReservationChecks(t *testing.T) {
 		t.Fatalf("fail-open: %v", err)
 	}
 }
+func TestTCPPortReservationValidationConflictAndOwnership(t *testing.T) {
+	ctx := context.Background()
+	svc, st, u1, u2 := testService(t, dnsMock{})
+	for _, raw := range []string{"", "0", "9999", "65536", "-1", "1.5", "+10000"} {
+		if _, err := svc.ReserveTCPPort(ctx, u1, raw, ""); !errors.Is(err, ErrInvalidTCPPort) {
+			t.Fatalf("invalid port %q: %v", raw, err)
+		}
+	}
+	for _, raw := range []string{"10000", "65535"} {
+		boundaryID, boundaryErr := svc.ReserveTCPPort(ctx, u1, raw, "")
+		if boundaryErr != nil || boundaryID == 0 {
+			t.Fatalf("boundary port %s: id=%d err=%v", raw, boundaryID, boundaryErr)
+		}
+	}
+	id, err := svc.ReserveTCPPort(ctx, u1, "25565", "")
+	if err != nil || id == 0 {
+		t.Fatalf("reserve: id=%d err=%v", id, err)
+	}
+	if _, err = svc.ReserveTCPPort(ctx, u2, "25565", ""); !errors.Is(err, ErrDuplicateTCPPort) {
+		t.Fatalf("duplicate: %v", err)
+	}
+	if err = svc.ReleaseTCPPort(ctx, u2, false, id, ""); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("cross-user release: %v", err)
+	}
+	if err = svc.ReleaseTCPPort(ctx, u1, false, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.TCPPort(ctx, id); !IsNotFound(err) {
+		t.Fatalf("port not released: %v", err)
+	}
+}
+
+func TestTCPPortReservationConcurrentConflict(t *testing.T) {
+	ctx := context.Background()
+	svc, _, u1, u2 := testService(t, dnsMock{})
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, uid := range []int64{u1, u2} {
+		go func(uid int64) {
+			<-start
+			_, err := svc.ReserveTCPPort(ctx, uid, "25565", "")
+			errs <- err
+		}(uid)
+	}
+	close(start)
+	var success, duplicate int
+	for range 2 {
+		err := <-errs
+		if err == nil {
+			success++
+		} else if errors.Is(err, ErrDuplicateTCPPort) {
+			duplicate++
+		} else {
+			t.Fatal(err)
+		}
+	}
+	if success != 1 || duplicate != 1 {
+		t.Fatalf("success=%d duplicate=%d", success, duplicate)
+	}
+}
+
 func TestAdminSuspendUnsuspendRevokeAndForceRelease(t *testing.T) {
 	ctx := context.Background()
 	svc, st, admin, user := testService(t, dnsMock{})

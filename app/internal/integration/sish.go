@@ -27,6 +27,7 @@ type disconnectRequest struct {
 	UserID     int64  `json:"user_id,omitempty"`
 	Generation int64  `json:"generation"`
 	Hostname   string `json:"hostname,omitempty"`
+	Port       int    `json:"port,omitempty"`
 	TunnelID   string `json:"tunnel_id,omitempty"`
 }
 
@@ -94,6 +95,9 @@ func (c *SishClient) DisconnectUser(ctx context.Context, id, generation int64) e
 }
 func (c *SishClient) DisconnectHost(ctx context.Context, host string, generation int64) error {
 	return c.do(ctx, http.MethodPost, "/v1/disconnect", disconnectRequest{Hostname: host, Generation: generation}, nil)
+}
+func (c *SishClient) DisconnectPort(ctx context.Context, port int, generation int64) error {
+	return c.do(ctx, http.MethodPost, "/v1/disconnect", disconnectRequest{Port: port, Generation: generation}, nil)
 }
 func (c *SishClient) Active(ctx context.Context) (model.TunnelSnapshot, error) {
 	var v model.TunnelSnapshot

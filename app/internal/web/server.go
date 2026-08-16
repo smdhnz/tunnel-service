@@ -56,6 +56,7 @@ type Page struct {
 	User                                                                   *model.User
 	Keys                                                                   []model.SSHKey
 	Subdomains                                                             []model.Subdomain
+	TCPPorts                                                               []model.TCPPort
 	Users                                                                  []model.User
 	Audit                                                                  []model.AuditLog
 	ActiveTunnels                                                          []model.ActiveTunnel
@@ -129,6 +130,9 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /tunnels", s.auth(http.HandlerFunc(s.tunnelsPage)))
 	s.mux.Handle("POST /subdomains", s.auth(s.csrf(http.HandlerFunc(s.subdomainReserve))))
 	s.mux.Handle("POST /subdomains/{id}/release", s.auth(s.csrf(http.HandlerFunc(s.subdomainRelease))))
+	s.mux.Handle("GET /tcp-ports", s.auth(http.HandlerFunc(s.tcpPortsPage)))
+	s.mux.Handle("POST /tcp-ports", s.auth(s.csrf(http.HandlerFunc(s.tcpPortReserve))))
+	s.mux.Handle("POST /tcp-ports/{id}/release", s.auth(s.csrf(http.HandlerFunc(s.tcpPortRelease))))
 	s.mux.Handle("GET /admin", s.auth(s.admin(http.HandlerFunc(s.adminHome))))
 	s.mux.Handle("GET /admin/users", s.auth(s.admin(http.HandlerFunc(s.adminUsers))))
 	s.mux.Handle("POST /admin/users/{id}/suspend", s.auth(s.admin(s.csrf(http.HandlerFunc(s.adminUserSuspend)))))
@@ -140,6 +144,8 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /admin/subdomains", s.auth(s.admin(http.HandlerFunc(s.adminSubdomains))))
 	s.mux.Handle("GET /admin/tunnels", s.auth(s.admin(http.HandlerFunc(s.adminTunnels))))
 	s.mux.Handle("POST /admin/subdomains/{id}/release", s.auth(s.admin(s.csrf(http.HandlerFunc(s.adminSubdomainRelease)))))
+	s.mux.Handle("GET /admin/tcp-ports", s.auth(s.admin(http.HandlerFunc(s.adminTCPPorts))))
+	s.mux.Handle("POST /admin/tcp-ports/{id}/release", s.auth(s.admin(s.csrf(http.HandlerFunc(s.adminTCPPortRelease)))))
 }
 func (s *Server) security(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -451,6 +457,24 @@ func (s *Server) subdomainRelease(w http.ResponseWriter, r *http.Request) {
 	err := s.svc.ReleaseSubdomain(r.Context(), current(r).User.ID, false, id, sourceIP(r))
 	s.actionRedirect(w, r, "/subdomains", err, "subdomain_released")
 }
+func (s *Server) tcpPortsPage(w http.ResponseWriter, r *http.Request) {
+	p := s.base(r, "TCPポート", "tcp-ports")
+	p.TCPPorts, _ = s.store.TCPPortsByUser(r.Context(), p.User.ID)
+	s.render(w, http.StatusOK, p)
+}
+func (s *Server) tcpPortReserve(w http.ResponseWriter, r *http.Request) {
+	_, err := s.svc.ReserveTCPPort(r.Context(), current(r).User.ID, r.Form.Get("port"), sourceIP(r))
+	s.actionRedirect(w, r, "/tcp-ports", err, "tcp_port_reserved")
+}
+func (s *Server) tcpPortRelease(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	err := s.svc.ReleaseTCPPort(r.Context(), current(r).User.ID, false, id, sourceIP(r))
+	s.actionRedirect(w, r, "/tcp-ports", err, "tcp_port_released")
+}
 func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	p := s.base(r, "管理概要", "admin-home")
 	p.Stats, _ = s.store.Stats(r.Context())
@@ -521,6 +545,20 @@ func (s *Server) adminSubdomains(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, http.StatusOK, p)
 }
+func (s *Server) adminTCPPorts(w http.ResponseWriter, r *http.Request) {
+	p := s.base(r, "全TCPポート", "admin-tcp-ports")
+	p.TCPPorts, _ = s.store.AllTCPPorts(r.Context())
+	s.render(w, http.StatusOK, p)
+}
+func (s *Server) adminTCPPortRelease(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	err := s.svc.ReleaseTCPPort(r.Context(), current(r).User.ID, true, id, sourceIP(r))
+	s.actionRedirect(w, r, "/admin/tcp-ports", err, "tcp_port_released")
+}
 func (s *Server) adminSubdomainRelease(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r)
 	if !ok {
@@ -552,7 +590,7 @@ func (s *Server) actionRedirect(w http.ResponseWriter, r *http.Request, path str
 	http.Redirect(w, r, path+"?"+q.Encode(), http.StatusSeeOther)
 }
 func publicError(err error) string {
-	known := []error{service.ErrInvalidKey, service.ErrKeyTooLarge, service.ErrDuplicateKey, service.ErrForbidden, service.ErrSuspended, service.ErrInvalidSubdomain, service.ErrReservedSubdomain, service.ErrDuplicateSubdomain, service.ErrDNSConflict, service.ErrDNSUnavailable}
+	known := []error{service.ErrInvalidKey, service.ErrKeyTooLarge, service.ErrDuplicateKey, service.ErrForbidden, service.ErrSuspended, service.ErrInvalidSubdomain, service.ErrReservedSubdomain, service.ErrDuplicateSubdomain, service.ErrDNSConflict, service.ErrDNSUnavailable, service.ErrInvalidTCPPort, service.ErrDuplicateTCPPort}
 	for _, e := range known {
 		if errors.Is(err, e) {
 			return e.Error()
@@ -564,7 +602,7 @@ func publicError(err error) string {
 	return "操作を完了できませんでした"
 }
 func flash(v string) string {
-	m := map[string]string{"login": "ログインしました", "key_added": "SSH公開鍵を追加しました", "key_updated": "SSH公開鍵を更新しました", "key_deleted": "SSH公開鍵を削除しました", "subdomain_reserved": "サブドメインを予約しました", "subdomain_released": "サブドメインを解放しました", "user_updated": "ユーザー状態を更新しました"}
+	m := map[string]string{"login": "ログインしました", "key_added": "SSH公開鍵を追加しました", "key_updated": "SSH公開鍵を更新しました", "key_deleted": "SSH公開鍵を削除しました", "subdomain_reserved": "サブドメインを予約しました", "subdomain_released": "サブドメインを解放しました", "tcp_port_reserved": "TCPポートを予約しました", "tcp_port_released": "TCPポートを解放しました", "user_updated": "ユーザー状態を更新しました"}
 	return m[v]
 }
 func pathID(r *http.Request) (int64, bool) {

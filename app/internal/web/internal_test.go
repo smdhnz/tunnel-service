@@ -32,6 +32,11 @@ func internalTestServer(t *testing.T) (InternalServer, *store.Store, string, int
 	if _, err = st.DB.Exec(`INSERT INTO subdomains(user_id,name) VALUES(?,?)`, u.ID, "demo"); err != nil {
 		t.Fatal(err)
 	}
+	for _, port := range []int{10000, 25565, 65535} {
+		if _, err = st.DB.Exec(`INSERT INTO tcp_ports(user_id,port) VALUES(?,?)`, u.ID, port); err != nil {
+			t.Fatal(err)
+		}
+	}
 	token := filepath.Join(t.TempDir(), "token")
 	secret := "01234567890123456789012345678901"
 	if err = os.WriteFile(token, []byte(secret), 0600); err != nil {
@@ -75,6 +80,30 @@ func TestInternalAuthorizationAndManualKeyDenied(t *testing.T) {
 		t.Fatal("disabled allowed")
 	}
 }
+func TestTCPAuthorizationRequiresOwnedReservation(t *testing.T) {
+	s, st, secret, _, _ := internalTestServer(t)
+	for _, tc := range []struct {
+		port int
+		code int
+	}{{9999, http.StatusForbidden}, {10000, http.StatusOK}, {25565, http.StatusOK}, {25566, http.StatusForbidden}, {65535, http.StatusOK}, {65536, http.StatusForbidden}} {
+		w := internalRequest(t, s, secret, "/v1/authorize", bindAuthorization{Fingerprint: "SHA256:key", Protocol: "tcp", Port: tc.port})
+		if w.Code != tc.code {
+			t.Fatalf("port=%d status=%d body=%s", tc.port, w.Code, w.Body.String())
+		}
+	}
+	other, err := st.UpsertDiscordUser(context.Background(), "other", "bob", "Bob", "", "", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.DB.Exec(`INSERT INTO ssh_keys(user_id,name,public_key,fingerprint) VALUES(?,?,?,?)`, other.ID, "key", "ssh-ed25519 AAAA", "SHA256:other"); err != nil {
+		t.Fatal(err)
+	}
+	w := internalRequest(t, s, secret, "/v1/authorize", bindAuthorization{Fingerprint: "SHA256:other", Protocol: "tcp", Port: 25565})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("other owner allowed: %d", w.Code)
+	}
+}
+
 func TestSystemKeyOnlyBindsSystemSubdomain(t *testing.T) {
 	s, st, secret, _, _ := internalTestServer(t)
 	if err := st.EnsureSystemResources(context.Background(), "control-plane-tunnel", "ssh-ed25519 AAAA", "SHA256:system", "console"); err != nil {

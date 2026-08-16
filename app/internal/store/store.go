@@ -104,7 +104,7 @@ func (s *Store) UserByID(ctx context.Context, id int64) (*model.User, error) {
 	return scanUser(s.DB.QueryRowContext(ctx, "SELECT "+userCols()+" FROM users WHERE id=?", id))
 }
 func (s *Store) Users(ctx context.Context) ([]model.User, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT u.id,u.discord_id,u.username,u.display_name,u.email,u.avatar_url,u.role,u.status,u.created_at,u.updated_at,(SELECT count(*) FROM ssh_keys k WHERE k.user_id=u.id),(SELECT count(*) FROM subdomains d WHERE d.user_id=u.id) FROM users u ORDER BY u.created_at DESC`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT u.id,u.discord_id,u.username,u.display_name,u.email,u.avatar_url,u.role,u.status,u.created_at,u.updated_at,(SELECT count(*) FROM ssh_keys k WHERE k.user_id=u.id),(SELECT count(*) FROM subdomains d WHERE d.user_id=u.id),(SELECT count(*) FROM tcp_ports p WHERE p.user_id=u.id) FROM users u ORDER BY u.created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +113,7 @@ func (s *Store) Users(ctx context.Context) ([]model.User, error) {
 	for rows.Next() {
 		var u model.User
 		var c, a string
-		if err = rows.Scan(&u.ID, &u.DiscordID, &u.Username, &u.DisplayName, &u.Email, &u.AvatarURL, &u.Role, &u.Status, &c, &a, &u.SSHKeyCount, &u.SubdomainCount); err != nil {
+		if err = rows.Scan(&u.ID, &u.DiscordID, &u.Username, &u.DisplayName, &u.Email, &u.AvatarURL, &u.Role, &u.Status, &c, &a, &u.SSHKeyCount, &u.SubdomainCount, &u.TCPPortCount); err != nil {
 			return nil, err
 		}
 		u.CreatedAt = parseTime(c)
@@ -303,6 +303,45 @@ func (s *Store) DeleteSubdomain(ctx context.Context, id int64) error {
 	return requireAffected(r, err)
 }
 
+func (s *Store) TCPPortsByUser(ctx context.Context, uid int64) ([]model.TCPPort, error) {
+	return s.tcpPorts(ctx, "WHERE p.user_id=?", uid)
+}
+func (s *Store) AllTCPPorts(ctx context.Context) ([]model.TCPPort, error) {
+	return s.tcpPorts(ctx, "", nil)
+}
+func (s *Store) tcpPorts(ctx context.Context, where string, arg any) ([]model.TCPPort, error) {
+	q := `SELECT p.id,p.user_id,u.username,p.port,p.created_at,p.updated_at FROM tcp_ports p JOIN users u ON u.id=p.user_id ` + where + ` ORDER BY p.port`
+	var rows *sql.Rows
+	var err error
+	if where == "" {
+		rows, err = s.DB.QueryContext(ctx, q)
+	} else {
+		rows, err = s.DB.QueryContext(ctx, q, arg)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.TCPPort
+	for rows.Next() {
+		var p model.TCPPort
+		var c, u string
+		if err = rows.Scan(&p.ID, &p.UserID, &p.Owner, &p.Port, &c, &u); err != nil {
+			return nil, err
+		}
+		p.CreatedAt, p.UpdatedAt = parseTime(c), parseTime(u)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+func (s *Store) TCPPort(ctx context.Context, id int64) (model.TCPPort, error) {
+	var p model.TCPPort
+	var c, u string
+	err := s.DB.QueryRowContext(ctx, `SELECT p.id,p.user_id,u.username,p.port,p.created_at,p.updated_at FROM tcp_ports p JOIN users u ON u.id=p.user_id WHERE p.id=?`, id).Scan(&p.ID, &p.UserID, &p.Owner, &p.Port, &c, &u)
+	p.CreatedAt, p.UpdatedAt = parseTime(c), parseTime(u)
+	return p, err
+}
+
 func (s *Store) Audit(ctx context.Context, actor, target *int64, action, typ, rid, ip, metadata string) error {
 	_, err := s.DB.ExecContext(ctx, "INSERT INTO audit_logs(actor_user_id,target_user_id,action,resource_type,resource_id,source_ip,metadata) VALUES(?,?,?,?,?,?,?)", actor, target, action, typ, rid, ip, metadata)
 	return err
@@ -347,7 +386,7 @@ func (s *Store) recentAudit(ctx context.Context, where string, limit int, arg an
 }
 func (s *Store) Stats(ctx context.Context) (model.Stats, error) {
 	var st model.Stats
-	err := s.DB.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM users WHERE status='active'),(SELECT count(*) FROM ssh_keys),(SELECT count(*) FROM subdomains),(SELECT count(*) FROM users WHERE status='suspended'),(SELECT count(*) FROM active_tunnels WHERE status='active')`).Scan(&st.Users, &st.ActiveUsers, &st.SSHKeys, &st.Subdomains, &st.SuspendedUsers, &st.ActiveTunnels)
+	err := s.DB.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM users WHERE status='active'),(SELECT count(*) FROM ssh_keys),(SELECT count(*) FROM subdomains),(SELECT count(*) FROM tcp_ports),(SELECT count(*) FROM users WHERE status='suspended'),(SELECT count(*) FROM active_tunnels WHERE status='active')`).Scan(&st.Users, &st.ActiveUsers, &st.SSHKeys, &st.Subdomains, &st.TCPPorts, &st.SuspendedUsers, &st.ActiveTunnels)
 	return st, err
 }
 
