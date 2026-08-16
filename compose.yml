@@ -47,6 +47,7 @@ services:
 
       - --https
       - --https-certificate-directory=/ssl
+      - --load-templates-directory=/templates/*
 
   control-plane-tunnel:
     build: ./tunnel-client
