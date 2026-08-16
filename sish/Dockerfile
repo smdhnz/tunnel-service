@@ -12,4 +12,5 @@ RUN git apply --check /tmp/control-plane.patch \
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/sish /sish
+COPY --from=build /src/templates /templates
 ENTRYPOINT ["/sish"]
