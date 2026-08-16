@@ -278,6 +278,35 @@ func (s *Store) SetUserStatusAtomic(ctx context.Context, id int64, status string
 	return tx.Commit()
 }
 
+// EnsureSystemResources registers the control-plane principal without creating a
+// Discord user. Its negative key ID namespace cannot collide with user keys.
+func (s *Store) EnsureSystemResources(ctx context.Context, name, publicKey, fingerprint, label string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var userConflict int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM subdomains WHERE name=?`, label).Scan(&userConflict); err != nil {
+		return err
+	}
+	if userConflict != 0 {
+		return fmt.Errorf("system subdomain %q conflicts with user reservation", label)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO system_ssh_keys(name,public_key,fingerprint) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET public_key=excluded.public_key,fingerprint=excluded.fingerprint,enabled=1,updated_at=CURRENT_TIMESTAMP`, name, publicKey, fingerprint)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM system_subdomains WHERE system_key_id=(SELECT id FROM system_ssh_keys WHERE name=?) AND name<>?`, name, label); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO system_subdomains(name,system_key_id) SELECT ?,id FROM system_ssh_keys WHERE name=? ON CONFLICT(name) DO UPDATE SET system_key_id=excluded.system_key_id`, label, name)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // AuthorizeBind returns the current mutation generation. A later connect event
 // must present the same generation; any intervening revocation makes it stale.
 func (s *Store) AuthorizeBind(ctx context.Context, fingerprint, label, protocol string, port int) (model.SSHKey, int64, error) {
@@ -290,6 +319,22 @@ func (s *Store) AuthorizeBind(ctx context.Context, fingerprint, label, protocol 
 	var enabled int
 	var c, u string
 	err = tx.QueryRowContext(ctx, `SELECT k.id,k.user_id,u.username,k.name,k.public_key,k.fingerprint,k.enabled,k.created_at,k.updated_at FROM ssh_keys k JOIN users u ON u.id=k.user_id WHERE k.fingerprint=? AND k.enabled=1 AND u.status='active'`, fingerprint).Scan(&k.ID, &k.UserID, &k.Owner, &k.Name, &k.PublicKey, &k.Fingerprint, &enabled, &c, &u)
+	if errors.Is(err, sql.ErrNoRows) && (protocol == "http" || protocol == "https" || protocol == "tls") {
+		var systemID int64
+		err = tx.QueryRowContext(ctx, `SELECT k.id,k.name,k.public_key,k.fingerprint,k.created_at,k.updated_at FROM system_ssh_keys k JOIN system_subdomains d ON d.system_key_id=k.id WHERE k.fingerprint=? AND k.enabled=1 AND d.name=?`, fingerprint, label).Scan(&systemID, &k.Name, &k.PublicKey, &k.Fingerprint, &c, &u)
+		if err == nil {
+			k.ID, k.UserID, k.Owner, k.Enabled = -systemID, 0, "[system]", true
+			k.CreatedAt, k.UpdatedAt = parseTime(c), parseTime(u)
+			g, genErr := currentGenerationTx(ctx, tx)
+			if genErr != nil {
+				return model.SSHKey{}, 0, genErr
+			}
+			if genErr = tx.Commit(); genErr != nil {
+				return model.SSHKey{}, 0, genErr
+			}
+			return k, g, nil
+		}
+	}
 	if err != nil {
 		return k, 0, err
 	}
@@ -351,7 +396,11 @@ func (s *Store) ApplyTunnelConnect(ctx context.Context, t model.ActiveTunnel, la
 	}
 	var valid int
 	if t.Protocol == "http" || t.Protocol == "https" || t.Protocol == "tls" {
-		err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id JOIN subdomains d ON d.user_id=u.id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active' AND d.name=?`, t.SSHKeyID, t.UserID, label).Scan(&valid)
+		if t.UserID == 0 && t.SSHKeyID < 0 {
+			err = tx.QueryRowContext(ctx, `SELECT count(*) FROM system_ssh_keys k JOIN system_subdomains d ON d.system_key_id=k.id WHERE k.id=? AND k.enabled=1 AND d.name=?`, -t.SSHKeyID, label).Scan(&valid)
+		} else {
+			err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id JOIN subdomains d ON d.user_id=u.id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active' AND d.name=?`, t.SSHKeyID, t.UserID, label).Scan(&valid)
+		}
 	} else {
 		err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active'`, t.SSHKeyID, t.UserID).Scan(&valid)
 	}
@@ -477,7 +526,11 @@ func (s *Store) ReconcileActiveSnapshot(ctx context.Context, snapshot model.Tunn
 			} else {
 				continue
 			}
-			err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id JOIN subdomains d ON d.user_id=u.id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active' AND d.name=? AND d.status='reserved'`, t.SSHKeyID, t.UserID, label).Scan(&valid)
+			if t.UserID == 0 && t.SSHKeyID < 0 {
+				err = tx.QueryRowContext(ctx, `SELECT count(*) FROM system_ssh_keys k JOIN system_subdomains d ON d.system_key_id=k.id WHERE k.id=? AND k.enabled=1 AND d.name=?`, -t.SSHKeyID, label).Scan(&valid)
+			} else {
+				err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id JOIN subdomains d ON d.user_id=u.id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active' AND d.name=? AND d.status='reserved'`, t.SSHKeyID, t.UserID, label).Scan(&valid)
+			}
 		} else {
 			err = tx.QueryRowContext(ctx, `SELECT count(*) FROM ssh_keys k JOIN users u ON u.id=k.user_id WHERE k.id=? AND k.user_id=? AND k.enabled=1 AND u.status='active'`, t.SSHKeyID, t.UserID).Scan(&valid)
 		}
@@ -530,7 +583,7 @@ func (s *Store) TunnelSyncState(ctx context.Context) (model.TunnelSyncState, err
 	return v, err
 }
 func (s *Store) ActiveTunnels(ctx context.Context, userID *int64) ([]model.ActiveTunnel, error) {
-	q := `SELECT t.id,t.user_id,t.ssh_key_id,u.username,COALESCE(k.name,'[revoked]'),t.protocol,t.hostname,t.tcp_port,t.source_ip,t.status,t.generation,t.event_sequence,t.connected_at,COALESCE(t.disconnected_at,'') FROM active_tunnels t JOIN users u ON u.id=t.user_id LEFT JOIN ssh_keys k ON k.id=t.ssh_key_id WHERE t.status!='disconnected'`
+	q := `SELECT t.id,t.user_id,t.ssh_key_id,COALESCE(u.username,'[system]'),COALESCE(k.name,sk.name,'[revoked]'),t.protocol,t.hostname,t.tcp_port,t.source_ip,t.status,t.generation,t.event_sequence,t.connected_at,COALESCE(t.disconnected_at,'') FROM active_tunnels t LEFT JOIN users u ON u.id=t.user_id LEFT JOIN ssh_keys k ON k.id=t.ssh_key_id LEFT JOIN system_ssh_keys sk ON sk.id=-t.ssh_key_id AND t.user_id=0 WHERE t.status!='disconnected'`
 	args := []any{}
 	if userID != nil {
 		q += " AND t.user_id=?"

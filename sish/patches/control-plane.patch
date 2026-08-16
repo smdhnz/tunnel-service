@@ -156,7 +156,7 @@ index 1af49c4..667b83a 100644
  	}
  
 +	controlTunnelID := ""
-+	if utils.ControlPlaneEnabled() && principal.UserID > 0 {
++	if utils.ControlPlaneEnabled() && principal.KeyID != 0 {
 +		controlTunnelID, err = utils.ControlPlaneRegister(sshConn, principal, protocol, portChannelForwardReplyPayload.Rport, func() { cleanupOnce.Do(cleanupChanListener) })
 +		if err != nil {
 +			log.Printf("control plane tunnel registration failed: %v", err)
@@ -406,7 +406,7 @@ index 0000000..a0ce5c9
 +	q := map[string]any{"fingerprint": fp, "ssh_user": conn.SSHConn.User(), "protocol": protocol, "hostname": hostname, "port": port, "source_ip": remoteIP(conn.SSHConn.RemoteAddr().String())}
 +	var p ControlPlanePrincipal
 +	err := cpRequest(context.Background(), http.MethodPost, "/v1/authorize", q, &p)
-+	if err == nil && p.UserID > 0 && p.KeyID > 0 && p.Generation > 0 {
++	if err == nil && ((p.UserID > 0 && p.KeyID > 0) || (p.UserID == 0 && p.KeyID < 0)) && p.Generation > 0 {
 +		p.Hostname = canonicalHostname(p.Hostname)
 +		controlRegistry.RLock()
 +		blocked := barredLocked(p)
@@ -921,7 +921,7 @@ new file mode 100644
 index 0000000..2dbb16e
 --- /dev/null
 +++ b/utils/controlplane_test.go
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,76 @@
 +package utils
 +
 +import (
@@ -948,6 +948,20 @@ index 0000000..2dbb16e
 +	viper.Set("control-plane-timeout", 100*time.Millisecond)
 +	t.Cleanup(func() { viper.Reset() })
 +	return token
++}
++func TestControlPlaneMode(t *testing.T) {
++	viper.Set("control-plane-mode", "audit")
++	if cpMode() != "audit" {
++		t.Fatal("audit mode changed")
++	}
++	viper.Set("control-plane-mode", "required")
++	if cpMode() != "required" {
++		t.Fatal("required mode changed")
++	}
++	viper.Set("control-plane-mode", "unknown")
++	if cpMode() != "required" {
++		t.Fatal("unknown mode did not fail closed")
++	}
 +}
 +func TestControlPlaneRequestFailClosedOnStatusAndTimeout(t *testing.T) {
 +	setupControlPlaneTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", http.StatusForbidden) }))

@@ -35,7 +35,7 @@ services:
       - --ssh-address=:2222
       - --http-address=:80
       - --https-address=:443
-      - --domain=${TUNNEL_DOMAIN}
+      - --domain=${TUNNEL_DOMAIN:?TUNNEL_DOMAIN is required}
 
       - --authentication=true
       - --authentication-keys-directory=/pubkeys
@@ -65,10 +65,10 @@ services:
       - sish
       - control-plane
     environment:
-      SSH_HOST: ${SSH_HOST}
+      SSH_HOST: ${SSH_HOST:?SSH_HOST is required}
       SSH_PORT: "2222"
       SSH_USER: tunnel-control-plane
-      REMOTE_LABEL: tunnel
+      REMOTE_LABEL: ${CONTROL_PLANE_SUBDOMAIN:?CONTROL_PLANE_SUBDOMAIN is required}
     volumes:
       - ./secrets/control-plane-tunnel-key:/run/secrets/control-plane-tunnel-key:ro
       - ./secrets/sish-known-hosts:/run/secrets/sish-known-hosts:ro
@@ -86,21 +86,23 @@ services:
       - /tmp:mode=1770,uid=${CONTROL_PLANE_UID:-1000},gid=${CONTROL_PLANE_GID:-1000}
 
     environment:
-      TUNNEL_DOMAIN: ${TUNNEL_DOMAIN}
-      SSH_HOST: ${SSH_HOST}
+      TUNNEL_DOMAIN: ${TUNNEL_DOMAIN:?TUNNEL_DOMAIN is required}
+      SSH_HOST: ${SSH_HOST:?SSH_HOST is required}
       SISH_SSH_PORT: "2222"
-      CONTROL_PLANE_ADDR: :8080
+      CONTROL_PLANE_ADDR: 127.0.0.1:8080
       CONTROL_PLANE_INTERNAL_ADDR: 127.0.0.1:8081
       CONTROL_PLANE_INTERNAL_TOKEN_FILE: /run/secrets/control-plane-internal-token
       SISH_MANAGEMENT_URL: http://127.0.0.1:8082
       SISH_MANAGEMENT_TOKEN_FILE: /run/secrets/sish-management-token
-      CONTROL_PLANE_HOST: tunnel.${TUNNEL_DOMAIN}
+      CONTROL_PLANE_HOST: ${CONTROL_PLANE_SUBDOMAIN:?CONTROL_PLANE_SUBDOMAIN is required}.${TUNNEL_DOMAIN:?TUNNEL_DOMAIN is required}
+      CONTROL_PLANE_SUBDOMAIN: ${CONTROL_PLANE_SUBDOMAIN:?CONTROL_PLANE_SUBDOMAIN is required}
+      CONTROL_PLANE_SYSTEM_PUBLIC_KEY_FILE: /run/secrets/control-plane-tunnel-key.pub
       DATABASE_PATH: /data/control-plane.db
       PUBKEYS_DIR: /pubkeys
       COOKIE_SECURE: "true"
-      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:?DISCORD_CLIENT_ID is required}
       DISCORD_CLIENT_SECRET_FILE: /run/secrets/discord-client-secret
-      DISCORD_REDIRECT_URI: https://tunnel.${TUNNEL_DOMAIN}/auth/callback
+      DISCORD_REDIRECT_URI: https://${CONTROL_PLANE_SUBDOMAIN:?CONTROL_PLANE_SUBDOMAIN is required}.${TUNNEL_DOMAIN:?TUNNEL_DOMAIN is required}/auth/callback
       SESSION_SECRET_FILE: /run/secrets/session-secret
       ADMIN_DISCORD_IDS: ${ADMIN_DISCORD_IDS:-}
       VERCEL_TOKEN_FILE: /run/secrets/vercel-token
@@ -121,3 +123,4 @@ services:
       - ./secrets/discord-client-secret:/run/secrets/discord-client-secret:ro
       - ./secrets/session-secret:/run/secrets/session-secret:ro
       - ./secrets/vercel-token:/run/secrets/vercel-token:ro
+      - ./secrets/control-plane-tunnel-key.pub:/run/secrets/control-plane-tunnel-key.pub:ro

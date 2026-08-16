@@ -10,15 +10,15 @@ import (
 )
 
 type Config struct {
-	Addr, InternalAddr, PublicHost, DatabasePath, PubKeysDir      string
-	InternalTokenFile, SISHManagementURL, SISHManagementTokenFile string
-	TunnelDomain, SSHHost                                         string
-	SISHSSHPort                                                   int
-	DiscordClientID, DiscordClientSecret, DiscordRedirectURI      string
-	SessionSecret                                                 string
-	CookieSecure                                                  bool
-	AdminDiscordIDs                                               map[string]bool
-	VercelToken                                                   string
+	Addr, InternalAddr, PublicHost, DatabasePath, PubKeysDir          string
+	InternalTokenFile, SISHManagementURL, SISHManagementTokenFile     string
+	TunnelDomain, SSHHost, ControlPlaneSubdomain, SystemPublicKeyFile string
+	SISHSSHPort                                                       int
+	DiscordClientID, DiscordClientSecret, DiscordRedirectURI          string
+	SessionSecret                                                     string
+	CookieSecure                                                      bool
+	AdminDiscordIDs                                                   map[string]bool
+	VercelToken                                                       string
 }
 
 func Load() (Config, error) {
@@ -33,13 +33,13 @@ func Load() (Config, error) {
 	c := Config{
 		Addr: env("CONTROL_PLANE_ADDR", ":8080"), InternalAddr: env("CONTROL_PLANE_INTERNAL_ADDR", "127.0.0.1:8081"), PublicHost: strings.TrimSpace(os.Getenv("CONTROL_PLANE_HOST")), DatabasePath: env("DATABASE_PATH", "../data/control-plane.db"), PubKeysDir: env("PUBKEYS_DIR", "../pubkeys"),
 		InternalTokenFile: env("CONTROL_PLANE_INTERNAL_TOKEN_FILE", "../secrets/control-plane-internal-token"), SISHManagementURL: env("SISH_MANAGEMENT_URL", "http://127.0.0.1:8082"), SISHManagementTokenFile: env("SISH_MANAGEMENT_TOKEN_FILE", "../secrets/sish-management-token"),
-		TunnelDomain: strings.TrimSpace(os.Getenv("TUNNEL_DOMAIN")), SSHHost: strings.TrimSpace(os.Getenv("SSH_HOST")), SISHSSHPort: port,
+		TunnelDomain: strings.TrimSpace(os.Getenv("TUNNEL_DOMAIN")), SSHHost: strings.TrimSpace(os.Getenv("SSH_HOST")), ControlPlaneSubdomain: strings.ToLower(strings.TrimSpace(os.Getenv("CONTROL_PLANE_SUBDOMAIN"))), SystemPublicKeyFile: env("CONTROL_PLANE_SYSTEM_PUBLIC_KEY_FILE", "../secrets/control-plane-tunnel-key.pub"), SISHSSHPort: port,
 		DiscordClientID: os.Getenv("DISCORD_CLIENT_ID"), DiscordClientSecret: secret("DISCORD_CLIENT_SECRET"), DiscordRedirectURI: os.Getenv("DISCORD_REDIRECT_URI"),
 		SessionSecret: secret("SESSION_SECRET"), CookieSecure: cookieSecure,
 		AdminDiscordIDs: csvSet(os.Getenv("ADMIN_DISCORD_IDS")), VercelToken: secret("VERCEL_TOKEN"),
 	}
-	if c.TunnelDomain == "" || c.SSHHost == "" {
-		return Config{}, errors.New("TUNNEL_DOMAIN and SSH_HOST are required")
+	if c.TunnelDomain == "" || c.SSHHost == "" || !validLabel(c.ControlPlaneSubdomain) {
+		return Config{}, errors.New("TUNNEL_DOMAIN, SSH_HOST and a valid CONTROL_PLANE_SUBDOMAIN are required")
 	}
 	if c.DiscordClientID == "" || c.DiscordClientSecret == "" || c.DiscordRedirectURI == "" {
 		return Config{}, errors.New("Discord OAuth configuration is required")
@@ -77,6 +77,17 @@ func Load() (Config, error) {
 	return c, nil
 }
 
+func validLabel(v string) bool {
+	if len(v) < 1 || len(v) > 63 || v[0] == '-' || v[len(v)-1] == '-' {
+		return false
+	}
+	for _, r := range v {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true

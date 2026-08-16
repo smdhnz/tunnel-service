@@ -9,10 +9,23 @@ func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("TUNNEL_DOMAIN", "example.test")
 	t.Setenv("SSH_HOST", "ssh.example.test")
+	t.Setenv("CONTROL_PLANE_SUBDOMAIN", "tunnel")
 	t.Setenv("DISCORD_CLIENT_ID", "id")
 	t.Setenv("DISCORD_CLIENT_SECRET", "secret")
 	t.Setenv("SESSION_SECRET", strings.Repeat("s", 32))
 	t.Setenv("CONTROL_PLANE_HOST", "")
+}
+
+func TestControlPlaneSubdomainRequiredAndValidated(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("COOKIE_SECURE", "true")
+	t.Setenv("DISCORD_REDIRECT_URI", "https://tunnel.example.test/auth/callback")
+	for _, value := range []string{"", "bad_name", "-bad"} {
+		t.Setenv("CONTROL_PLANE_SUBDOMAIN", value)
+		if _, err := Load(); err == nil {
+			t.Fatalf("invalid subdomain %q accepted", value)
+		}
+	}
 }
 
 func TestCookieSecurityConfiguration(t *testing.T) {

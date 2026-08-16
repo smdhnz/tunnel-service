@@ -41,8 +41,22 @@ func main() {
 		logger.Error("sish management configuration failed", "error", err)
 		os.Exit(1)
 	}
+	publicKey, err := os.ReadFile(cfg.SystemPublicKeyFile)
+	if err != nil {
+		logger.Error("system public key read failed", "error", err)
+		os.Exit(1)
+	}
+	canonicalKey, fingerprint, err := service.ValidatePublicKey(string(publicKey))
+	if err != nil {
+		logger.Error("system public key is invalid", "error", err)
+		os.Exit(1)
+	}
+	if err = st.EnsureSystemResources(context.Background(), "control-plane-tunnel", canonicalKey, fingerprint, cfg.ControlPlaneSubdomain); err != nil {
+		logger.Error("system resource registration failed", "error", err)
+		os.Exit(1)
+	}
 	keyWriter := integration.PublicKeyWriter{Dir: cfg.PubKeysDir}
-	svc := &service.Service{Store: st, DNS: dns, Keys: keyWriter, Tunnels: sish, Logger: logger}
+	svc := &service.Service{Store: st, DNS: dns, Keys: keyWriter, Tunnels: sish, Logger: logger, ControlPlaneSubdomain: cfg.ControlPlaneSubdomain}
 	if err = svc.Reconcile(context.Background()); err != nil {
 		logger.Error("authorized key reconciliation failed", "error", err)
 		os.Exit(1)

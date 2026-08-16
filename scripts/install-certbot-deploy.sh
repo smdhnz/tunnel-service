@@ -4,6 +4,7 @@ set -euo pipefail
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 set -a
+# shellcheck disable=SC1091
 source "$BASE_DIR/.env"
 set +a
 
@@ -12,6 +13,7 @@ set +a
 : "${CONTROL_PLANE_GID:=1000}"
 [[ "$CONTROL_PLANE_UID" =~ ^[0-9]+$ ]] || { echo "CONTROL_PLANE_UID must be numeric" >&2; exit 1; }
 [[ "$CONTROL_PLANE_GID" =~ ^[0-9]+$ ]] || { echo "CONTROL_PLANE_GID must be numeric" >&2; exit 1; }
+[[ "$CONTROL_PLANE_UID" != 0 && "$CONTROL_PLANE_GID" != 0 ]] || { echo "CONTROL_PLANE_UID/GID must be non-zero" >&2; exit 1; }
 
 HOOK_PATH="/etc/letsencrypt/renewal-hooks/deploy/sish-cert.sh"
 TMP_FILE="$(mktemp)"
@@ -31,6 +33,7 @@ install -o "${CONTROL_PLANE_UID}" -g "${CONTROL_PLANE_GID}" -m 0640 \
   "${BASE_DIR}/ssl/${TUNNEL_DOMAIN}.key"
 
 docker compose \
+  --env-file "${BASE_DIR}/.env" \
   -f "${BASE_DIR}/compose.yml" \
   restart sish
 EOF

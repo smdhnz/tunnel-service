@@ -41,11 +41,12 @@ type PublicKeyStore interface {
 }
 
 type Service struct {
-	Store   *store.Store
-	DNS     integration.DNSChecker
-	Keys    PublicKeyStore
-	Logger  *slog.Logger
-	Tunnels TunnelController
+	Store                 *store.Store
+	DNS                   integration.DNSChecker
+	Keys                  PublicKeyStore
+	Logger                *slog.Logger
+	Tunnels               TunnelController
+	ControlPlaneSubdomain string
 
 	keyMu sync.Mutex
 }
@@ -224,20 +225,13 @@ func (s *Service) ReserveSubdomain(ctx context.Context, uid int64, raw, ip strin
 		return 0, err
 	}
 	name := strings.ToLower(strings.TrimSpace(raw))
-	if name == "tunnel" {
-		u, err := s.Store.UserByID(ctx, uid)
-		if err != nil {
-			return 0, err
-		}
-		if u.Role != "admin" {
-			return 0, ErrReservedSubdomain
-		}
-	} else {
-		var err error
-		name, err = NormalizeSubdomain(name)
-		if err != nil {
-			return 0, err
-		}
+	if name != "" && name == strings.ToLower(strings.TrimSpace(s.ControlPlaneSubdomain)) {
+		return 0, ErrReservedSubdomain
+	}
+	var err error
+	name, err = NormalizeSubdomain(name)
+	if err != nil {
+		return 0, err
 	}
 	existing, err := s.Store.AllSubdomains(ctx)
 	if err != nil {

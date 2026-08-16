@@ -131,7 +131,7 @@ func (s InternalServer) authorize(w http.ResponseWriter, r *http.Request) {
 }
 func (s InternalServer) connect(w http.ResponseWriter, r *http.Request) {
 	var e tunnelEvent
-	if decodeJSON(w, r, &e) != nil || e.EventID == "" || e.SourceID == "" || e.ID == "" || e.UserID < 1 || e.KeyID < 1 || e.Generation < 1 || e.Sequence < 1 {
+	if decodeJSON(w, r, &e) != nil || e.EventID == "" || e.SourceID == "" || e.ID == "" || e.UserID < 0 || e.KeyID == 0 || e.Generation < 1 || e.Sequence < 1 {
 		http.Error(w, "Bad request", 400)
 		return
 	}

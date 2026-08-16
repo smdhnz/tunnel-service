@@ -1,533 +1,407 @@
 # Tunnel Service
 
-`sish` を使ったリバーストンネル基盤です。
+`sish`を利用した、Discord認証・予約制のリバーストンネル基盤です。
 
-SSH reverse forwarding を使って、ローカルのHTTPサービスをインターネットへ公開できます。
+- 公開トンネル: `*.${TUNNEL_DOMAIN}`
+- SSH endpoint: `${SSH_HOST}:2222`
+- 管理画面: `https://${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}`
+- 通常トンネル: active user・enabled SSH key・所有する予約済みsubdomainを毎bind時に照合
+- 管理画面トンネル: 専用system key・system subdomainを起動時に自動登録
 
-現在は、登録済みのSSH公開鍵を持つクライアントのみがトンネルを作成できます。
+`audit` / `required`の意味は変更していません。通常運用は`required`です。
 
-## Current Architecture
+## 公開portとsecurity boundary
 
-* VPS: KAGOYA CLOUD VPS
-* OS: Ubuntu 24.04 LTS
-* Container Runtime: Docker / Docker Compose
-* Tunnel Server: sish
-* DNS: Vercel DNS
-* TLS: Let's Encrypt
-* ACME Client: Certbot
-* DNS-01 Automation: Vercel REST API
-* SSH Authentication: Public Key Authentication
+| Port       | 用途         |
+| ---------- | ------------ |
+| `80/tcp`   | HTTP tunnel  |
+| `443/tcp`  | HTTPS tunnel |
+| `2222/tcp` | sish SSH     |
 
-## Environment Variables
+Control Plane `8080`、内部認可API `8081`、sish management API `8082`はhost networkのloopbackでのみ使用します。Composeは`8080`を`ports` / `expose`しません。
 
-環境固有の値は `.env` で管理します。
+- Control Plane / control-plane-tunnel: 非root
+- sish: UID 0、全capability drop後に`NET_BIND_SERVICE`だけ付与
+- 全service: read-only root filesystem、`no-new-privileges`
+- secretは必要なserviceにだけread-only mount
+- 管理トンネル秘密鍵はcontrol-plane-tunnelだけにmount
 
-例:
+# 新規KAGOYA Cloud VPSセットアップ
 
-```env
-TUNNEL_DOMAIN=fumiya.dev
-SSH_HOST=ssh.fumiya.dev
+Ubuntu 24.04 LTSを前提とします。
 
-VERCEL_TOKEN=your_vercel_token
-```
+## 1. 前提ソフトウェア
 
-`.env` はGit管理しません。
+- Git
+- Docker Engine / Docker Compose plugin
+- OpenSSH client (`ssh-keygen`)
+- OpenSSL
+- curl / Python 3（Certbot DNS hook）
+- Certbot
 
-リポジトリには `.env.example` のみコミットします。
-
-## DNS
-
-以下のDNSレコードを設定します。
-
-```text
-ssh.<your-domain>    A    <VPS IPv4>
-*.<your-domain>      A    <VPS IPv4>
-```
-
-既存のVercelアプリ用サブドメインがある場合は、個別のCNAMEレコードでVercelへ向けます。
-
-例:
-
-```text
-app.<your-domain>    CNAME    cname.vercel-dns-017.com.
-```
-
-## Tunnel Example
-
-ローカルでWebサーバーを起動します。
+Dockerは公式手順で導入し、deploy userがDockerを実行できる状態にします。
 
 ```bash
-python3 -m http.server 3000
+docker --version
+docker compose version
+git --version
+ssh -V
+openssl version
+certbot --version
 ```
 
-登録済みのSSH鍵を使ってsishへ接続します。
+## 2. DNS
+
+Vercel DNSで次を作成します。
+
+```text
+ssh.example.com  A  <VPS IPv4>
+*.example.com    A  <VPS IPv4>
+```
+
+`ssh` labelとwildcardは一般ユーザーの予約対象ではありません。既存の完全一致record（例: `app.example.com`）は予約時の競合として拒否します。wildcard record自体は完全一致競合にしません。Vercel API障害時はfail closedです。
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 \
-  -p 2222 \
-  -R test:80:localhost:3000 \
-  ssh.<your-domain>
+getent ahostsv4 ssh.example.com
+getent ahostsv4 tunnel.example.com
 ```
 
-以下でアクセスできます。
+## 3. Discord Developer Portal
+
+1. <https://discord.com/developers/applications> でApplicationを作成
+2. OAuth2 Redirectsへ管理画面callbackを追加
 
 ```text
-http://test.<your-domain>
-https://test.<your-domain>
+https://tunnel.example.com/auth/callback
 ```
 
-## SSH Authentication
+`tunnel`を別labelにする場合は、その値へ読み替えます。
 
-sishへの接続はSSH公開鍵認証を必須にしています。
+3. Client ID / Client Secretを控える
+4. Discord Developer Modeで管理者のuser IDを取得
 
-許可する公開鍵は `pubkeys/` 配下に配置します。
+Botは不要です。
 
-例:
-
-```text
-pubkeys/
-└── user.pub
-```
-
-公開鍵ファイルの内容はOpenSSH形式です。
-
-```text
-ssh-ed25519 AAAA... user@example
-```
-
-登録済みの公開鍵を使用した接続は許可されます。
-
-未登録鍵を使用した場合は、以下のように拒否されます。
-
-```text
-Permission denied (publickey).
-```
-
-## Ports
-
-* `80/tcp`: HTTP
-* `443/tcp`: HTTPS
-* `2222/tcp`: sish SSH endpoint
-
-## Directory Structure
-
-```text
-.
-├── compose.yml
-├── README.md
-├── .gitignore
-├── .env
-├── .env.example
-├── keys/
-├── pubkeys/
-├── ssl/
-└── scripts/
-    ├── certbot-auth.sh
-    ├── certbot-cleanup.sh
-    └── install-certbot-deploy.sh
-```
-
-## Docker Compose
-
-現在の構成では、環境変数からポートやドメインを読み込みます。
-
-主要なsish設定は以下です。
-
-```yaml
-command:
-  - --ssh-address=:2222
-  - --http-address=:80
-  - --https-address=:443
-  - --domain=${TUNNEL_DOMAIN}
-
-  - --authentication=true
-  - --authentication-keys-directory=/pubkeys
-  - --private-keys-directory=/keys
-  - --verify-dns=false
-  - --bind-random-subdomains=false
-  - --bind-random-ports=true
-
-  - --https
-  - --https-certificate-directory=/ssl
-```
-
-主要なvolumeは以下です。
-
-```yaml
-volumes:
-  - ./keys:/keys
-  - ./ssl:/ssl:ro
-  - ./pubkeys:/pubkeys:ro
-```
-
-## SSH Host Keys
-
-sish自身のSSHホスト鍵は `keys/` 配下へ永続化します。
-
-これにより、Dockerコンテナを再作成してもSSH fingerprintが変わりません。
-
-```text
-keys/
-└── ssh_key
-```
-
-`keys/` は秘密情報を含むためGit管理しません。
-
-## TLS Certificate
-
-Let's Encrypt のワイルドカード証明書を使用します。
-
-```text
-*.<your-domain>
-```
-
-Certbotによって生成された証明書は、sish用に以下へ配置します。
-
-```text
-ssl/
-├── <your-domain>.crt
-└── <your-domain>.key
-```
-
-sishは `ssl/` をread-onlyでマウントしてHTTPS通信を処理します。
-
-## Certbot DNS-01 Automation
-
-ワイルドカード証明書の取得・更新ではDNS-01 challengeを使用します。
-
-DNSはVercelで管理しています。
-
-Certbotの認証時に、Vercel REST APIを使って以下のTXTレコードを一時的に作成します。
-
-```text
-_acme-challenge.<your-domain>
-```
-
-処理の流れは以下です。
-
-```text
-Certbot
-  |
-  v
-certbot-auth.sh
-  |
-  v
-Vercel REST API
-  |
-  v
-_acme-challenge TXT作成
-  |
-  v
-DNS反映待機
-  |
-  v
-Let's Encryptによる検証
-  |
-  v
-証明書発行
-  |
-  v
-certbot-cleanup.sh
-  |
-  v
-TXT削除
-```
-
-## Certbot Hooks
-
-### Authentication Hook
-
-```text
-scripts/certbot-auth.sh
-```
-
-Vercel APIを使って `_acme-challenge` TXTレコードを作成します。
-
-このスクリプトは `.env` から以下を読み込みます。
-
-```text
-TUNNEL_DOMAIN
-VERCEL_TOKEN
-```
-
-DNS反映待ちのため、現在は一定時間sleepしてからCertbotへ処理を戻します。
-
-### Cleanup Hook
-
-```text
-scripts/certbot-cleanup.sh
-```
-
-認証後に、一時作成した `_acme-challenge` TXTレコードを削除します。
-
-このスクリプトも `.env` から設定を読み込みます。
-
-### Deploy Hook
-
-Certbotの証明書更新成功後、sishへ新しい証明書を反映するdeploy hookを使います。
-
-deploy hook本体はリポジトリ外の以下へ配置されます。
-
-```text
-/etc/letsencrypt/renewal-hooks/deploy/sish-cert.sh
-```
-
-このファイルは手動編集せず、リポジトリ内のインストーラーから生成します。
+## 4. 最小`.env`
 
 ```bash
-./scripts/install-certbot-deploy.sh
+git clone https://github.com/smdhnz/tunnel-service.git
+cd tunnel-service
+cp .env.example .env
+nano .env
 ```
 
-インストーラーは実行時の `.env` とリポジトリの絶対パスを使って、環境固有の値を埋め込んだdeploy hookを生成します。
+```dotenv
+TUNNEL_DOMAIN=example.com
+SSH_HOST=ssh.example.com
+CONTROL_PLANE_SUBDOMAIN=tunnel
 
-生成されたdeploy hookは実行時に `.env` を参照しません。
+DISCORD_CLIENT_ID=...
+DISCORD_CLIENT_SECRET=...
+ADMIN_DISCORD_IDS=123456789012345678
+VERCEL_TOKEN=...
 
-deploy hookは証明書更新後に以下を実行します。
+SISH_CONTROL_PLANE_MODE=required
+CONTROL_PLANE_UID=1000
+CONTROL_PLANE_GID=1000
+```
 
-1. Certbotが管理する最新証明書を `ssl/` 配下へコピー
-2. sishコンテナを再起動
-3. 更新済み証明書をHTTPS endpointへ反映
-
-環境再構築時は、Certbotと証明書をセットアップした後にインストーラーを再実行してください。
-
-## Certbot Renewal
-
-Certbotではmanual DNS challengeとhookを使って証明書を更新します。
-
-例:
+`CONTROL_PLANE_UID/GID`はdeploy userへ合わせます。
 
 ```bash
+id -u
+id -g
+```
+
+非rootでsetupする場合、一致しなければfail fastします。rootでsetupする場合も、container実行user用の非0 UID/GIDを指定して所有者を設定します。UID/GID `0`は拒否されます。
+
+管理画面host、OAuth callback、reverse tunnel labelはComposeが次のように生成します。`tunnel`はコード固定ではありません。
+
+```text
+${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}
+https://${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}/auth/callback
+-R ${CONTROL_PLANE_SUBDOMAIN}:80:127.0.0.1:8080
+```
+
+## 5. setup
+
+```bash
+./scripts/setup.sh
+```
+
+setupはDockerを起動しません。次を冪等に実行します。
+
+- 必須env、label、UID/GID、必要commandを生成前に検証
+- `data/ pubkeys/ keys/ ssl/ secrets/`をmode `0750`で作成し、root実行時はDB/WALを含む配下全体のUID/GIDを整合
+- 内部token / session secretを暗号学的乱数で作成
+- Discord / Vercel secretを`.env`からsecret fileへ初回だけcopy
+- sish永続host keyをed25519・passphraseなしで作成（private keyはsishの実行groupが読める`0640`）
+- 管理トンネル専用keyをed25519・passphraseなしで作成
+- 管理公開鍵をsish認証directoryへ配置
+- 永続host keyからstrictな`secrets/sish-known-hosts`を生成
+- 所有者・mode・key pair整合を検証
+
+全処理は`umask 077`です。既存secret、key、DB、証明書を上書きしません。欠落artifactだけを再生成でき、既存system公開鍵との不一致は安全側で停止します。rootによる所有者整合ではpersistent directory内のsymlink・hard linkを拒否し、repository外を変更しません。secret値は標準出力へ出しません。
+
+`known_hosts`はネットワークから未検証host keyを取得せず、sishが実際に使用する永続秘密鍵から公開鍵を導出します。このためsish起動前に生成でき、`StrictHostKeyChecking=yes`を維持できます。setup出力のfingerprintを運用記録へ保存してください。
+
+生成物:
+
+| File                                   | 理由 / 読み取るservice                                                 |
+| -------------------------------------- | ---------------------------------------------------------------------- |
+| `secrets/control-plane-internal-token` | sish→Control Plane認可API認証 / sish, Control Plane                    |
+| `secrets/sish-management-token`        | snapshot・disconnect API / sish, Control Plane                         |
+| `secrets/session-secret`               | Web session HMAC / Control Plane                                       |
+| `secrets/discord-client-secret`        | OAuth code exchange / Control Plane                                    |
+| `secrets/vercel-token`                 | DNS exact conflict check / Control Plane（Certbot hookは`.env`を使用） |
+| `keys/ssh_key`                         | sish host fingerprint永続化 / sish                                     |
+| `secrets/control-plane-tunnel-key`     | 管理画面reverse tunnel / control-plane-tunnelのみ                      |
+| `secrets/control-plane-tunnel-key.pub` | system key起動時登録 / Control Plane                                   |
+| `pubkeys/system-control-plane.pub`     | sish SSH認証 / sish                                                    |
+| `secrets/sish-known-hosts`             | MITM防止 / control-plane-tunnel                                        |
+
+Discord / Vercel secretを意図的にrotationする場合、service停止・backup後に対象secret fileを削除してsetupを再実行します。setupは値変更だけでは既存fileを上書きしません。
+
+## 6. wildcard TLS
+
+TLSはLet's Encrypt wildcard証明書とVercel DNS-01 hookを使用します。初回のLet's Encrypt email・利用規約同意は運用者の明示操作が必要なため、setupは証明書を自動取得しません。証明書がない場合もsetup自体は安全に完了し、次操作を表示します。
+
+この節のshell変数を読み込みます（値は表示しません）。
+
+```bash
+set -a
+source .env
+set +a
+chmod +x scripts/certbot-auth.sh scripts/certbot-cleanup.sh
 sudo certbot certonly \
   --manual \
   --preferred-challenges dns \
-  --manual-auth-hook "$(pwd)/scripts/certbot-auth.sh" \
-  --manual-cleanup-hook "$(pwd)/scripts/certbot-cleanup.sh" \
+  --manual-auth-hook "$PWD/scripts/certbot-auth.sh" \
+  --manual-cleanup-hook "$PWD/scripts/certbot-cleanup.sh" \
+  --cert-name "$TUNNEL_DOMAIN" \
   -d "*.${TUNNEL_DOMAIN}"
 ```
 
-初回セットアップ後は以下で自動更新可能か確認します。
+Certbotのpromptでemailを入力し、利用規約へ同意します。hookは`_acme-challenge` TXTだけを一時作成・削除します。作成したrecord IDは`secrets/.certbot-vercel-record-id`へmode `0600`でatomic保存し、残存stateやsymlinkがある場合は上書きせず停止します。cleanupはVercel APIのDELETE成功後だけstateを削除するため、失敗時は同じcleanup hookを再実行できます。
+
+初回証明書を配置します（既存先がある場合は先に内容を確認し、上書きしないでください）。
 
 ```bash
-sudo certbot renew --dry-run
+test ! -e "ssl/${TUNNEL_DOMAIN}.crt"
+test ! -e "ssl/${TUNNEL_DOMAIN}.key"
+sudo install -o "$CONTROL_PLANE_UID" -g "$CONTROL_PLANE_GID" -m 0644 \
+  "/etc/letsencrypt/live/${TUNNEL_DOMAIN}/fullchain.pem" \
+  "ssl/${TUNNEL_DOMAIN}.crt"
+sudo install -o "$CONTROL_PLANE_UID" -g "$CONTROL_PLANE_GID" -m 0640 \
+  "/etc/letsencrypt/live/${TUNNEL_DOMAIN}/privkey.pem" \
+  "ssl/${TUNNEL_DOMAIN}.key"
 ```
 
-成功時は以下のような結果になります。
-
-```text
-Congratulations, all simulated renewals succeeded
-```
-
-## Vercel API Token
-
-CertbotのDNS-01自動化にはVercel API Tokenを使用します。
-
-トークンは `.env` の以下の変数へ設定します。
-
-```env
-VERCEL_TOKEN=your_vercel_token
-```
-
-`.env` はGitへコミットしません。
-
-## Git Ignore Policy
-
-以下はGit管理しません。
-
-* `.env`
-* `ssl/`
-* `keys/`
-* `pubkeys/*.pub`
-* SQLite database files
-* Logs
-* Temporary files
-* Editor-specific files
-
-特に以下は外部へ公開しないでください。
-
-* Vercel API token
-* TLS private key
-* sish SSH host private key
-* Application secrets
-* Session secrets
-
-SSH公開鍵そのものは秘密情報ではありませんが、`pubkeys/` は「誰がサービスを利用できるか」という認可設定でもあるため、実運用の `.pub` ファイルはGit管理しません。
-
-## Security Status
-
-現在、sishへの接続にはSSH公開鍵認証を必須にしています。
-
-確認済みの挙動:
-
-* 登録済みSSH公開鍵: 接続可能
-* 未登録SSH公開鍵: 接続拒否
-* HTTP reverse forwarding: 動作確認済み
-* HTTPS reverse forwarding: 動作確認済み
-* SSH host key persistence: 動作確認済み
-* TLS certificate renewal dry-run: 成功
-* Vercel DNS APIによるTXT作成・削除: 動作確認済み
-
-Control Planeとrepo内sish hardening patchで以下を追加しています。
-
-* Discord Web user authentication、User / SSH key mapping、revocation workflow
-* 予約所有者・有効鍵・active userをbind時に照合するper-user subdomain authorization
-* Active tunnel lifecycle、user/admin live UI、鍵・ユーザー・hostname単位の強制切断
-* Subdomain予約・Vercel DNS競合防止、transactional audit/outbox
-* bounded per-IP rate/connection limit、temporary block、unknown-host lightweight 404
-* 404とは分離した分単位の集約security telemetry
-
-TCP tunnelは有効ユーザーの有効鍵かつ明示的な1〜65535番portだけを認可します。TCP portのユーザー別予約台帳はまだ提供していないため、HTTP/HTTPS subdomain認可より粒度が粗い点に注意してください。
-
-## Security Considerations
-
-インターネットへSSH endpointを公開すると、自動スキャンや認証試行が発生します。
-
-そのため、認証なしでsishを公開しないでください。
-
-現在は以下を使用しています。
-
-```text
---authentication=true
---authentication-keys-directory=/pubkeys
-```
-
-SSHログイン自体は公開鍵directoryを維持し、各remote-forward requestはControl Planeのloopback authorization APIでも検証します。Control Planeのtimeout、エラー、denyは `required` modeでfail closedです。
-
-想定する構成:
-
-```text
-User
-  |
-  v
-Web GUI
-  |
-  v
-Control Plane
-  |
-  +--> User Account
-  +--> SSH Public Keys
-  +--> Subdomain Permissions
-  +--> TCP Port Permissions
-  |
-  v
-sish
-```
-
-## Control Plane MVP
-
-`app/` に単一のGo applicationとして実装しています。
-
-* Discord OAuth2 login（state検証、一回限りstate、session rotation）
-* SQLite user / session / SSH key / subdomain / audit log管理
-* OpenSSH公開鍵検証、fingerprint・重複検査
-* `pubkeys/control-plane-<user-id>-<key-id>.pub` へのatomic反映（予約prefixにより既存手動鍵と分離）
-* Vercel DNS APIのread-only exact record競合検査（障害時fail closed）
-* User dashboard / SSH Keys / Subdomains
-* Admin dashboard / Users / SSH Keys / Subdomains / Active Tunnels / Security telemetry
-* CSRF、server-side authorization、security headers、CSP、body size・rate制限
-* `active_tunnels`、集約`security_telemetry`、transactional `outbox`
-
-内部は `config / store / service / integration / web` に分離しています。migrationは起動時に適用し、SQLiteではWAL、busy timeout、foreign keysを有効化します。鍵・subdomain・user状態のmutation、audit、outbox enqueueは同じSQLite transactionで確定します。filesystem失効とsish切断は即時実行に加え、idempotentなoutbox workerが指数backoff（最大5分）で永続retryします。起動後はsishのsequence付きregistry snapshotを5秒間隔で同期します。callbackとsnapshotはevent ID/sequenceで冪等化され、古いsnapshotは拒否します。management API障害時は接続を削除せず `stale`、失効要求中は `disconnecting` と表示し、sishからdisconnect確認後だけ `disconnected` にします。
-
-### Local development
-
-GoをインストールしたWSLではDockerなしで起動できます。
+renewal deploy hookを冪等にinstallします。更新成功時だけ証明書をcopyし、sishをrestartします。
 
 ```bash
-cp .env.example .env
-# .envへDiscord OAuth設定、SESSION_SECRET等を設定
-cd app
-set -a; source ../.env; set +a
-go run ./cmd/control-plane
+./scripts/install-certbot-deploy.sh
+sudo certbot renew --dry-run --run-deploy-hooks
 ```
 
-ローカルHTTPでは `COOKIE_SECURE=false` を使用できますが、redirect URIのhostは `localhost` またはloopback addressに限定されます。本番は `COOKIE_SECURE=true` とHTTPS redirect URIが必須で、session/state cookieは `__Host-` prefix、`Path=/`、host-only、Secure、HttpOnlyになります。`CONTROL_PLANE_HOST` を設定した場合はredirect URIのhostと一致させてください。
+Certbot管理下の`/etc/letsencrypt`をsetupは変更・削除しません。
 
-Docker Composeでは、先にbind mount先をdeploy user所有で作成してから起動します。Composeは存在しないdirectoryをroot所有で暗黙作成せずfail fastします。
+## 7. 起動
 
 ```bash
-install -d -m 0750 data pubkeys keys ssl secrets
-# Control Planeがbind mountへ書き込めるよう、deploy userのUID/GIDを.envと一致させる。
-chown -R "${CONTROL_PLANE_UID:-1000}:${CONTROL_PLANE_GID:-1000}" data pubkeys keys ssl secrets
-umask 077
-openssl rand -base64 48 > secrets/control-plane-internal-token
-openssl rand -base64 48 > secrets/sish-management-token
-printf '%s' "$DISCORD_CLIENT_SECRET" > secrets/discord-client-secret
-openssl rand -base64 48 > secrets/session-secret
-printf '%s' "$VERCEL_TOKEN" > secrets/vercel-token
-chmod 0400 secrets/*
-# 1000:1000以外で動かす場合は.envのUID/GIDを `id -u` / `id -g` に合わせる
-# 既存証明書は .crt=0644 / .key=0640、keys/は上記UID/GID所有にする
-find ssl -type f -name '*.crt' -exec chmod 0644 {} +
-find ssl -type f -name '*.key' -exec chmod 0640 {} +
+docker compose config --quiet
 docker compose up --build -d
 ```
 
-Control Planeは `data/` と `pubkeys/` へ書き込みます。sishのSSH host keyは初回起動前に `keys/` へ用意し、sishからはread-onlyで参照します。`CONTROL_PLANE_UID` / `CONTROL_PLANE_GID` はbind mountとsecret fileを所有するdeploy userのIDへ合わせてください。Control Planeはその非root UID/GIDで動作します。sishは80/443をbindするためUID 0・deploy userのGIDで起動しますが、root filesystemと全volumeはread-only、全capabilityをdropした上で`NET_BIND_SERVICE`だけを付与し、`no-new-privileges`を有効にします。Certbot deploy hook installerは指定UID/GIDとmodeを生成hookへ固定します。`control-plane-` prefixはControl Plane管理用に予約し、このprefixがない既存手動鍵（数字形式のファイル名を含む）は削除・上書きしません。
+初回Control Plane起動時、migration後に次をDBへsystem resourceとして自動登録します。
 
-### Secret isolation
+- `CONTROL_PLANE_SUBDOMAIN`
+- `secrets/control-plane-tunnel-key.pub`のfingerprint
 
-Composeは `.env` をinterpolationへ使用しますが、secret値をcontainer環境変数やcommand lineへ展開しません。`secrets/` のread-only fileを必要なcontainerだけへmountします。sishが受け取るのはControl Plane internal API tokenとsish management API tokenだけで、Discord secret、session secret、Vercel tokenは受け取りません。Control PlaneのVercel integrationはDNS record一覧のGETだけを実装し、作成・更新・削除を行いません。Certbot scriptsの既存DNS-01更新処理とは分離されています。
+通常`users` / `ssh_keys` / `subdomains` rowを偽装しません。独立した`system_ssh_keys` / `system_subdomains`を使い、認可・connect event・snapshotの共通整合性検証を通します。system keyはsystem subdomainだけbindでき、一般keyはbindできません。
 
-### Internet scans and unknown hosts
+## 8. auditからrequiredへの切替
 
-未登録hostnameはsishで対応するtunnelを探索後、backendへproxyせずbodyなし404で終了します。unknown-host 404は1件ずつapplication log/audit DBへ書かず、`unknown_host` counterとして分単位で集約します。sishは`RemoteAddr`だけをIP判定に使い、未設定のproxy headerを信頼しません。per-IP stateは最大10,000件です。HTTP/HTTPS/TCP/SSHはprotocol解析前のaccept段階で接続数を制限（HTTP/TCP 50、SSH 20）し、HTTP serverは5秒のReadHeaderTimeoutを設定します。request bucketは120 burst・毎秒2回復、accept bucketは60 burst・毎秒1回復で、違反継続時は5分blockします。Control Planeにもgeneral/login/mutation別のbounded limiterがあります。
+新規環境は最初から`required`を推奨します。既存manual keyの移行だけ一時的に使います。
 
-### sish patchと認可mode
-
-upstreamの `authentication-key-request-url` はSSH鍵のログイン可否だけを受け取り、requested bindを受け取りません。そのため `sish/Dockerfile` はupstream commit `9609e83bb87aa7c65b14a67e84738c9ad13cd3ca` を固定取得し、`sish/patches/control-plane.patch` を `git apply --check` 後にbuildします。upstream全体はvendorしません。
-
-* `required`（default）: callback deny・timeout・error、未移行manual key、所有外hostnameをbind拒否。random subdomain fallbackも禁止
-* `audit`: callback結果を記録しつつ移行中のbindを継続。セキュリティ境界として使用しない
-
-#### 既存manual keyからの無停止移行
-
-1. `SISH_CONTROL_PLANE_MODE=audit` でpatched sishを起動する
-2. 既存利用者をDiscord loginさせ、manual keyと利用hostnameをControl Planeへ登録・予約する
-3. AdminのActive Tunnelsとsecurity telemetryでdeny候補がないことを確認する
-4. `.env` を `SISH_CONTROL_PLANE_MODE=required` へ変更し、`docker compose up -d sish` を実行する
-5. manual `.pub` はrequired modeでログインできても全bindが拒否されるため、確認後に手動削除する
-
-認可切替のrollbackは `SISH_CONTROL_PLANE_MODE=audit docker compose up -d sish` です。これは一時的にbind制限を緩和するため、障害復旧後すぐrequiredへ戻してください。DB migration前には `data/control-plane.db*` を整合した状態でbackupしてください。既存の80/443/2222、`keys/`、`ssl/`、`pubkeys/`、Certbot deploy hookは変更していません。
-
-## Future Features
-
-### TCP Tunnel
-
-HTTP/HTTPSだけでなく、任意TCPポートのreverse forwardingを提供します。
-
-### Live Streaming
-
-将来的には超低遅延ライブ配信を追加します。
-
-想定用途:
-
-```text
-OBS
-  |
-  v
-WHIP / WebRTC
-  |
-  v
-Media Gateway
-  |
-  v
-Browser
+```dotenv
+SISH_CONTROL_PLANE_MODE=audit
 ```
 
-通常のHTTP/TCP tunnelとは別のMedia Gatewayとして設計する予定です。
+- `audit`: callback結果を記録しつつ既存bindを継続。security boundaryとして使わない
+- `required`: deny・timeout・error・未予約・所有外をfail closedで拒否
 
-## Next Steps
+利用者のDiscord login、key登録、subdomain予約、deny候補確認後:
 
-* Git initial commit
-* Reproducible setup documentation
-* Install / bootstrap scripts
-* Control Plane / GUI
-* User authentication
-* SSH public key management
-* Subdomain reservation
-* TCP tunnel support
-* Rate limiting
-* Abuse prevention
-* Audit logging
-* Security hardening
+```bash
+sed -i 's/^SISH_CONTROL_PLANE_MODE=audit$/SISH_CONTROL_PLANE_MODE=required/' .env
+unset SISH_CONTROL_PLANE_MODE
+docker compose up -d --force-recreate sish
+docker compose restart control-plane-tunnel
+```
 
+## 9. 正常性確認
+
+```bash
+set -a
+source .env
+set +a
+docker compose ps
+curl -fsS http://127.0.0.1:8080/healthz
+curl -I "https://${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}"
+docker compose logs --since=5m | grep -iE 'panic|fatal|permission denied' || true
+```
+
+期待値:
+
+- 全service `Up`
+- healthz `ok`
+- 管理画面HTTP `200`またはloginへのredirect
+- 管理画面を手動key登録・subdomain予約せず利用可能
+
+一般ユーザーの動作確認:
+
+1. Discord login
+2. OpenSSH公開鍵を登録
+3. `demo`を予約
+4. 接続
+
+```bash
+ssh -N -i ~/.ssh/id_ed25519 -p 2222 \
+  -R demo:80:127.0.0.1:3000 "$SSH_HOST"
+```
+
+未予約label、他user所有label、`ssh`、`CONTROL_PLANE_SUBDOMAIN`、`_acme-challenge`、既存固定予約語は拒否されます。
+
+# 更新
+
+先に下記「Backup / Restore」のbackup手順を完了してから更新します。
+
+```bash
+cd ~/tunnel-service
+git pull --ff-only
+./scripts/setup.sh
+docker compose config --quiet
+docker compose up --build -d
+```
+
+sish再作成時、接続中のuser tunnelは再接続が必要です。管理トンネルは`restart: unless-stopped`で再接続します。
+
+# Backup / Restore
+
+対象:
+
+```text
+.env
+data/       # SQLite DB（WAL含む）
+pubkeys/    # sish認証公開鍵
+keys/       # sish host key
+ssl/        # 配置済み証明書
+secrets/    # token・管理トンネルkey・known_hosts
+/etc/letsencrypt/  # Certbot account・renewal state
+```
+
+SQLiteは稼働中にDB本体だけcopyしません。次はrepository artifactとCertbot stateを一度に保存する単独実行可能な手順です。
+
+```bash
+cd ~/tunnel-service
+BACKUP="$HOME/tunnel-service-backup-$(date +%Y%m%d-%H%M%S)"
+install -d -m 0700 "$BACKUP"
+docker compose stop control-plane
+if cp -a .env data pubkeys keys ssl secrets "$BACKUP/"; then
+  docker compose start control-plane
+else
+  docker compose start control-plane
+  exit 1
+fi
+sudo tar -C /etc -czf "$BACKUP/letsencrypt.tar.gz" letsencrypt
+printf 'Backup: %s\n' "$BACKUP"
+```
+
+Restore（`BACKUP`を実際のbackup pathへ設定）:
+
+```bash
+cd ~/tunnel-service
+BACKUP=/path/to/tunnel-service-backup-YYYYmmdd-HHMMSS
+docker compose down
+cp -a "$BACKUP/.env" "$BACKUP/data" "$BACKUP/pubkeys" \
+  "$BACKUP/keys" "$BACKUP/ssl" "$BACKUP/secrets" .
+sudo tar -C /etc -xzf "$BACKUP/letsencrypt.tar.gz"
+./scripts/setup.sh
+docker compose up --build -d
+```
+
+restore先のdeploy user UID/GIDが異なる場合は`.env`を修正し、rootでsetupして所有者を整合させます。鍵・証明書を失った状態で既存fileを空fileとして作らないでください。
+
+# Troubleshooting
+
+## setupが必須env不足で停止
+
+```bash
+grep -E '^(TUNNEL_DOMAIN|SSH_HOST|CONTROL_PLANE_SUBDOMAIN|DISCORD_CLIENT_ID|VERCEL_TOKEN|CONTROL_PLANE_UID|CONTROL_PLANE_GID)=' .env
+```
+
+secret値そのものはterminalへ表示しないでください。
+
+## UID/GID mismatch / permission denied
+
+```bash
+id -u; id -g
+stat -c '%u:%g %a %n' data pubkeys keys ssl secrets
+```
+
+`.env`を実行userへ合わせるか、rootで非0のdeploy UID/GIDを指定して`./scripts/setup.sh`を再実行します。setupは内容を上書きせずownership/modeを検証・修正します。
+
+## system public key mismatch
+
+`secrets/control-plane-tunnel-key.pub`と`pubkeys/system-control-plane.pub`の一方だけを交換しています。稼働を停止し、backupから同じkey pairをrestoreしてください。setupは不一致を自動上書きしません。
+
+## known_hosts mismatch
+
+`SSH_HOST`または`keys/ssh_key`が既存`secrets/sish-known-hosts`と不一致です。意図したhost key rotationなら停止・backup・fingerprint確認後にknown_hostsを削除し、setupで再生成します。`StrictHostKeyChecking=no`は使用しません。
+
+## TLS file missing
+
+```bash
+set -a
+source .env
+set +a
+ls -l "ssl/${TUNNEL_DOMAIN}.crt" "ssl/${TUNNEL_DOMAIN}.key"
+sudo certbot certificates
+```
+
+上記「wildcard TLS」を完了してからsishを起動します。
+
+## 管理画面トンネルがrequiredで拒否
+
+```bash
+docker compose logs --tail=100 control-plane sish control-plane-tunnel
+ls -l secrets/control-plane-tunnel-key.pub pubkeys/system-control-plane.pub
+```
+
+Control Plane起動時にsystem resource登録が失敗していないか確認します。GUIから管理keyや管理subdomainを登録する手順はありません。
+
+## mode変更が反映されない
+
+現在shellに`source .env`した古い値が残っています。
+
+```bash
+unset SISH_CONTROL_PLANE_MODE
+docker compose up -d --force-recreate sish
+```
+
+## Vercel API障害
+
+予約はfail closedになります。token権限、domain、Vercel statusを確認し、障害中に認可を迂回しないでください。
+
+# 開発・検証
+
+```bash
+./scripts/setup_test.sh
+./scripts/compose_test.sh
+cd app && go test ./...
+docker compose config --quiet
+docker compose build
+```
+
+setup testは一時fixtureだけを使用し、実VPSのDocker・secret・証明書を変更しません。Compose testはconfig展開だけを行い、containerを起動しません。

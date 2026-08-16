@@ -75,6 +75,59 @@ func TestInternalAuthorizationAndManualKeyDenied(t *testing.T) {
 		t.Fatal("disabled allowed")
 	}
 }
+func TestSystemKeyOnlyBindsSystemSubdomain(t *testing.T) {
+	s, st, secret, _, _ := internalTestServer(t)
+	if err := st.EnsureSystemResources(context.Background(), "control-plane-tunnel", "ssh-ed25519 AAAA", "SHA256:system", "console"); err != nil {
+		t.Fatal(err)
+	}
+	w := internalRequest(t, s, secret, "/v1/authorize", bindAuthorization{Fingerprint: "SHA256:system", Protocol: "http", Hostname: "console.example.test", Port: 80})
+	if w.Code != http.StatusOK {
+		t.Fatalf("system bind=%d %s", w.Code, w.Body.String())
+	}
+	var v map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	if int64(v["user_id"].(float64)) != 0 || int64(v["key_id"].(float64)) >= 0 {
+		t.Fatalf("system principal=%v", v)
+	}
+	for _, host := range []string{"demo.example.test", "unused.example.test"} {
+		w = internalRequest(t, s, secret, "/v1/authorize", bindAuthorization{Fingerprint: "SHA256:system", Protocol: "http", Hostname: host, Port: 80})
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("system key bound %s: %d", host, w.Code)
+		}
+	}
+	w = internalRequest(t, s, secret, "/v1/authorize", bindAuthorization{Fingerprint: "SHA256:key", Protocol: "http", Hostname: "console.example.test", Port: 80})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("user key bound system host: %d", w.Code)
+	}
+	w = internalRequest(t, s, secret, "/v1/authorize", bindAuthorization{Fingerprint: "SHA256:key", Protocol: "http", Hostname: "unused.example.test", Port: 80})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("user key bound unreserved host: %d", w.Code)
+	}
+}
+
+func TestSystemTunnelLifecycle(t *testing.T) {
+	s, st, secret, _, _ := internalTestServer(t)
+	if err := st.EnsureSystemResources(context.Background(), "control-plane-tunnel", "ssh-ed25519 AAAA", "SHA256:system", "console"); err != nil {
+		t.Fatal(err)
+	}
+	w := internalRequest(t, s, secret, "/v1/authorize", bindAuthorization{Fingerprint: "SHA256:system", Protocol: "http", Hostname: "console", Port: 80})
+	var v map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	e := tunnelEvent{EventID: "system-connect", SourceID: "source-system", ID: "system-tid", UserID: 0, KeyID: int64(v["key_id"].(float64)), Generation: int64(v["generation"].(float64)), Sequence: 1, Protocol: "http", Hostname: "console.example.test", Port: 80}
+	w = internalRequest(t, s, secret, "/v1/tunnels/connect", e)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("system connect=%d %s", w.Code, w.Body.String())
+	}
+	got, err := st.ActiveTunnels(context.Background(), nil)
+	if err != nil || len(got) != 1 || got[0].Owner != "[system]" {
+		t.Fatalf("active=%+v err=%v", got, err)
+	}
+}
+
 func TestInternalTokenAndTunnelLifecycle(t *testing.T) {
 	s, st, secret, uid, kid := internalTestServer(t)
 	r := httptest.NewRequest(http.MethodPost, "/v1/authorize", bytes.NewReader([]byte(`{}`)))
