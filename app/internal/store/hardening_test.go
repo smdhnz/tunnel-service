@@ -63,13 +63,16 @@ func TestSecurityTelemetryRetentionAndPagination(t *testing.T) {
 	if oldMetrics != 0 || oldBatches != 0 {
 		t.Fatalf("expired telemetry remains: metrics=%d batches=%d", oldMetrics, oldBatches)
 	}
-	first, more, err := s.SecurityTelemetryPage(ctx, 1, 0)
-	if err != nil || len(first) != 1 || !more {
-		t.Fatalf("first page=%+v more=%v err=%v", first, more, err)
+	var retainedUnknownHosts int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM security_telemetry WHERE event_type='unknown_host'`).Scan(&retainedUnknownHosts); err != nil {
+		t.Fatal(err)
 	}
-	second, more, err := s.SecurityTelemetryPage(ctx, 1, 1)
-	if err != nil || len(second) != 1 || more {
-		t.Fatalf("second page=%+v more=%v err=%v", second, more, err)
+	if retainedUnknownHosts != 1 {
+		t.Fatalf("unknown-host telemetry was not retained: %d", retainedUnknownHosts)
+	}
+	first, more, err := s.SecurityTelemetryPage(ctx, 1, 0)
+	if err != nil || len(first) != 1 || more || first[0].EventType == "unknown_host" {
+		t.Fatalf("visible security page=%+v more=%v err=%v", first, more, err)
 	}
 }
 

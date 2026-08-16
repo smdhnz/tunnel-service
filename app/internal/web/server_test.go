@@ -238,6 +238,27 @@ func TestTCPPortUserAndAdminRoutes(t *testing.T) {
 	}
 }
 
+func TestAdminPaginationParameters(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/admin/tunnels?tunnel_page=2&tunnel_per_page=30&security_page=3&security_per_page=50", nil)
+	page, size, offset := requestedPage(r, "tunnel_page", "tunnel_per_page")
+	if page != 2 || size != 30 || offset != 30 {
+		t.Fatalf("page=%d size=%d offset=%d", page, size, offset)
+	}
+	p := pagination(r, "tunnel_page", "tunnel_per_page", page, size, true)
+	if p.PreviousURL != "/admin/tunnels?security_page=3&security_per_page=50&tunnel_per_page=30" || p.NextURL != "/admin/tunnels?security_page=3&security_per_page=50&tunnel_page=3&tunnel_per_page=30" {
+		t.Fatalf("previous=%q next=%q", p.PreviousURL, p.NextURL)
+	}
+	if len(p.PageSizes) != 4 || !p.PageSizes[1].Selected {
+		t.Fatalf("page sizes=%+v", p.PageSizes)
+	}
+
+	r = httptest.NewRequest(http.MethodGet, "/admin/users?page=invalid&per_page=25", nil)
+	page, size, offset = requestedPage(r, "page", "per_page")
+	if page != 1 || size != 10 || offset != 0 {
+		t.Fatalf("invalid fallback: page=%d size=%d offset=%d", page, size, offset)
+	}
+}
+
 func TestSessionAndCSRF(t *testing.T) {
 	s, _, token, csrf := testServer(t)
 	r := httptest.NewRequest(http.MethodPost, "/logout", strings.NewReader("csrf_token=bad"))

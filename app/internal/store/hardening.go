@@ -778,7 +778,7 @@ func (s *Store) RecentSecurityTelemetry(ctx context.Context, limit int) ([]model
 	return out, err
 }
 func (s *Store) SecurityTelemetryPage(ctx context.Context, limit, offset int) ([]model.SecurityMetric, bool, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT bucket_start,event_type,count FROM security_telemetry ORDER BY bucket_start DESC,event_type LIMIT ? OFFSET ?`, limit+1, offset)
+	rows, err := s.DB.QueryContext(ctx, `SELECT bucket_start,event_type,count FROM security_telemetry WHERE event_type<>'unknown_host' ORDER BY bucket_start DESC,event_type LIMIT ? OFFSET ?`, limit+1, offset)
 	if err != nil {
 		return nil, false, err
 	}
