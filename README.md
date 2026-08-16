@@ -67,39 +67,7 @@ openssl version
 certbot --version
 ```
 
-## 2. DNS
-
-Vercel DNSで次を作成します。
-
-```text
-ssh.example.com  A  <VPS IPv4>
-*.example.com    A  <VPS IPv4>
-```
-
-`ssh` labelとwildcardは一般ユーザーの予約対象ではありません。既存の完全一致record（例: `app.example.com`）は予約時の競合として拒否します。wildcard record自体は完全一致競合にしません。Vercel API障害時はfail closedです。
-
-```bash
-getent ahostsv4 ssh.example.com
-getent ahostsv4 tunnel.example.com
-```
-
-## 3. Discord Developer Portal
-
-1. <https://discord.com/developers/applications> でApplicationを作成
-2. OAuth2 Redirectsへ管理画面callbackを追加
-
-```text
-https://tunnel.example.com/auth/callback
-```
-
-`tunnel`を別labelにする場合は、その値へ読み替えます。
-
-3. Client ID / Client Secretを控える
-4. Discord Developer Modeで管理者のuser IDを取得
-
-Botは不要です。
-
-## 4. 最小`.env`
+## 2. `.env`を作成
 
 ```bash
 git clone https://github.com/smdhnz/tunnel-service.git
@@ -108,37 +76,75 @@ cp .env.example .env
 nano .env
 ```
 
-```dotenv
-TUNNEL_DOMAIN=example.com
-SSH_HOST=ssh.example.com
-CONTROL_PLANE_SUBDOMAIN=tunnel
+最低限、次の値を設定します。
 
-DISCORD_CLIENT_ID=...
-DISCORD_CLIENT_SECRET=...
-ADMIN_DISCORD_IDS=123456789012345678
-VERCEL_TOKEN=...
-
-SISH_CONTROL_PLANE_MODE=required
-CONTROL_PLANE_UID=1000
-CONTROL_PLANE_GID=1000
-```
-
-`CONTROL_PLANE_UID/GID`はdeploy userへ合わせます。
+| 変数 | 設定内容 | 設定例 |
+| ---- | -------- | ------ |
+| `TUNNEL_DOMAIN` | 公開トンネルの基底ドメイン | `example.com` |
+| `SSH_HOST` | sishへ接続するSSHホスト | `ssh.example.com` |
+| `CONTROL_PLANE_SUBDOMAIN` | 管理画面のサブドメインlabel | `tunnel` |
+| `DISCORD_CLIENT_ID` | Discord ApplicationのClient ID | Discord Developer Portalで取得 |
+| `DISCORD_CLIENT_SECRET` | Discord ApplicationのClient Secret | Discord Developer Portalで取得 |
+| `ADMIN_DISCORD_IDS` | 管理者のDiscord user ID。複数指定はカンマ区切り | `123456789012345678` |
+| `VERCEL_TOKEN` | DNS recordを参照・操作できるVercel token | Vercelで発行 |
+| `SISH_CONTROL_PLANE_MODE` | 通常は`required` | `required` |
+| `CONTROL_PLANE_UID` | deploy userのUID | `id -u`の出力 |
+| `CONTROL_PLANE_GID` | deploy userのGID | `id -g`の出力 |
 
 ```bash
 id -u
 id -g
 ```
 
-非rootでsetupする場合、一致しなければfail fastします。rootでsetupする場合も、container実行user用の非0 UID/GIDを指定して所有者を設定します。UID/GID `0`は拒否されます。
+`CONTROL_PLANE_UID/GID`は上記コマンドで確認したdeploy userへ合わせます。非rootでsetupする場合、一致しなければfail fastします。rootでsetupする場合も、container実行user用の非0 UID/GIDを指定して所有者を設定します。UID/GID `0`は拒否されます。
 
-管理画面host、OAuth callback、reverse tunnel labelはComposeが次のように生成します。`tunnel`はコード固定ではありません。
+以降の`${TUNNEL_DOMAIN}`、`${SSH_HOST}`、`${CONTROL_PLANE_SUBDOMAIN}`は、`.env`に設定した値を表します。shellで使う前に次のように読み込みます。
+
+```bash
+set -a
+source .env
+set +a
+```
+
+Composeは設定値から次を生成します。管理画面のlabelやhostはコード固定ではありません。
 
 ```text
-${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}
-https://${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}/auth/callback
--R ${CONTROL_PLANE_SUBDOMAIN}:80:127.0.0.1:8080
+管理画面:       https://${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}
+OAuth callback: https://${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}/auth/callback
+管理トンネル:   -R ${CONTROL_PLANE_SUBDOMAIN}:80:127.0.0.1:8080
 ```
+
+## 3. DNS
+
+Vercel DNSで次のA recordを作成します。
+
+| Name | Type | Value |
+| ---- | ---- | ----- |
+| `${SSH_HOST}` | `A` | VPSのIPv4 address |
+| `*.${TUNNEL_DOMAIN}` | `A` | VPSのIPv4 address |
+
+`SSH_HOST`のlabelとwildcardは一般ユーザーの予約対象ではありません。既存の完全一致record（例: `app.${TUNNEL_DOMAIN}`）は予約時の競合として拒否します。wildcard record自体は完全一致競合にしません。Vercel API障害時はfail closedです。
+
+DNS反映を確認します。
+
+```bash
+getent ahostsv4 "$SSH_HOST"
+getent ahostsv4 "${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}"
+```
+
+## 4. Discord Developer Portal
+
+1. <https://discord.com/developers/applications> でApplicationを作成
+2. OAuth2 Redirectsへ次のcallback URLを追加
+
+```text
+https://${CONTROL_PLANE_SUBDOMAIN}.${TUNNEL_DOMAIN}/auth/callback
+```
+
+3. Client ID / Client Secretを`.env`の`DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET`へ設定
+4. Discord Developer Modeで管理者のuser IDを取得し、`.env`の`ADMIN_DISCORD_IDS`へ設定
+
+Botは不要です。
 
 ## 5. setup
 
