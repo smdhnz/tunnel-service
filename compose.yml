@@ -50,7 +50,10 @@ services:
       - --verify-dns=false
       - --bind-random-subdomains=false
       - --force-requested-subdomains=true
-      - --bind-random-ports=true
+      # TCPポートはcontrol-planeで事前予約した番号をそのまま使用する。
+      # bind失敗時のランダムポートへの置換は、予約台帳との不整合を起こすため禁止する。
+      - --bind-random-ports=false
+      - --force-requested-ports=true
 
       - --https
       - --https-certificate-directory=/ssl
