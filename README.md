@@ -317,6 +317,8 @@ ssh -N -i ~/.ssh/id_ed25519 -p 2222 \
 
 sish既定の転送アイドルタイムアウト5秒はMinecraftのkeepalive間隔に対して短いため、`compose.yml`では`--idle-connection-timeout=2m`を指定します。このdeadlineは読み書きのたびに更新され、2分間まったく通信しない接続だけを終了します。
 
+Dockerのログは全serviceで1ファイル10MB、最大3ファイルにローテーションされます。sishの正常なEOFや二重closeは通常ログへ出力しません。運用確認では全履歴を表示せず、`docker compose logs --tail=100 sish`または`docker compose logs --since=5m sish`を使用します。
+
 # 更新
 
 先に下記「Backup / Restore」のbackup手順を完了してから更新します。

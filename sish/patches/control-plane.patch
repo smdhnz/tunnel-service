@@ -1077,6 +1077,45 @@ index 0000000..71c4dc6
 +}
 +
 +func (c *addrConn) RemoteAddr() net.Addr { return c.remote }
+diff --git a/utils/conn.go b/utils/conn.go
+--- a/utils/conn.go
++++ b/utils/conn.go
+@@ -4,6 +4,7 @@ import (
+ 	"bufio"
+ 	"bytes"
+ 	"crypto/tls"
++	"errors"
+ 	"io"
+ 	"log"
+ 	"net"
+@@ -214,17 +215,22 @@ func (i IdleTimeoutConn) Write(buf []byte) (int, error) {
+ 	return i.Conn.Write(buf)
+ }
+ 
+ // CopyBoth copies betwen a reader and writer and will cleanup each.
+ func CopyBoth(writer net.Conn, reader io.ReadWriteCloser) {
++	var closeOnce sync.Once
+ 	closeBoth := func() {
+-		err := reader.Close()
+-		if err != nil {
+-			log.Println("Error closing reader:", err)
+-		}
+-
+-		err = writer.Close()
+-		if err != nil {
+-			log.Println("Error closing writer:", err)
+-		}
++		closeOnce.Do(func() {
++			if err := reader.Close(); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && viper.GetBool("debug") {
++				log.Println("Error closing reader:", err)
++			}
++			if err := writer.Close(); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && viper.GetBool("debug") {
++				log.Println("Error closing writer:", err)
++			}
++		})
+ 	}
+ 
+ 	var tcon io.ReadWriter
 diff --git a/utils/controlplane_test.go b/utils/controlplane_test.go
 new file mode 100644
 index 0000000..8dee57a
