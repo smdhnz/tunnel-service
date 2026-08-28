@@ -305,6 +305,18 @@ ssh -N -i ~/.ssh/id_ed25519 -p 2222 \
 
 未予約または他ユーザー所有のTCPポートは拒否されます。VPS / クラウド側では上記の専用範囲を一度だけ許可すれば、以後ポートごとの開放は不要です。
 
+公開接続の濫用防止状態は、SSH、HTTP、TCPの各listenerで分離されます。TCPはさらに公開ポート単位で分離されるため、同じNAT配下からの管理画面アクセスやSSHトンネル常時接続がMinecraftなどのTCP接続枠を消費しません。既定の公開TCP制限は送信元IP・公開ポートごとに同時200接続、burst 240接続、毎秒20接続回復です。`compose.yml`では次の引数で明示しています。
+
+```text
+--abuse-tcp-max-connections=200
+--abuse-tcp-accept-burst=240
+--abuse-tcp-accept-rate=20
+```
+
+制限違反は成功した接続を挟むとリセットされ、連続5回の違反で一時ブロックに入ります。管理画面の`temporarily_blocked`はブロック中の拒否総数ではなく、新しく一時ブロックへ遷移した回数です。更新前に蓄積済みの値は履歴として残るため、デプロイ直後の表示には旧方式の件数が含まれる場合があります。
+
+sish既定の転送アイドルタイムアウト5秒はMinecraftのkeepalive間隔に対して短いため、`compose.yml`では`--idle-connection-timeout=2m`を指定します。このdeadlineは読み書きのたびに更新され、2分間まったく通信しない接続だけを終了します。
+
 # 更新
 
 先に下記「Backup / Restore」のbackup手順を完了してから更新します。

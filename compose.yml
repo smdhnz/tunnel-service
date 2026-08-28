@@ -55,9 +55,18 @@ services:
       - --bind-random-ports=false
       - --force-requested-ports=true
 
+      # sish既定の5秒では、Minecraftのkeepalive間隔中に正常なTCP接続を
+      # idleと誤認し得る。読み書きのたび更新されるdeadlineを2分に延長する。
+      - --idle-connection-timeout=2m
+
       - --https
       - --https-certificate-directory=/ssl
       - --load-templates-directory=/templates/*
+      # SSH/HTTPとは独立した、ゲーム等の公開TCP用制限。Minecraftの
+      # server-list pingや再接続が家庭NAT単位で誤ブロックされない値にする。
+      - --abuse-tcp-max-connections=200
+      - --abuse-tcp-accept-burst=240
+      - --abuse-tcp-accept-rate=20
       - --abuse-request-burst=2000
       - --abuse-request-rate=50
 

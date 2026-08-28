@@ -6,9 +6,13 @@ index 7fb1656..a5a1805 100644
  	rootCmd.PersistentFlags().IntP("log-to-file-max-backups", "", 3, "The maxium number of rotated logs files to keep")
  	rootCmd.PersistentFlags().IntP("log-to-file-max-age", "", 28, "The maxium number of days to store log output in a file")
  	rootCmd.PersistentFlags().IntP("service-console-max-content-length", "", -1, "The max content length before we stop reading the response body")
-+	rootCmd.PersistentFlags().IntP("abuse-http-max-connections", "", 50, "Maximum concurrent public HTTP/TCP connections per source IP")
++	rootCmd.PersistentFlags().IntP("abuse-http-max-connections", "", 50, "Maximum concurrent public HTTP connections per source IP and listening address")
 +	rootCmd.PersistentFlags().IntP("abuse-ssh-max-connections", "", 20, "Maximum concurrent SSH connections per source IP")
++	rootCmd.PersistentFlags().IntP("abuse-tcp-max-connections", "", 200, "Maximum concurrent public TCP connections per source IP and listening port")
 +	rootCmd.PersistentFlags().IntP("abuse-accept-burst", "", 60, "Accepted public connection burst per source IP")
++	rootCmd.PersistentFlags().IntP("abuse-accept-rate", "", 1, "Accepted public connections replenished per second per source IP")
++	rootCmd.PersistentFlags().IntP("abuse-tcp-accept-burst", "", 240, "Accepted public TCP connection burst per source IP and listening port")
++	rootCmd.PersistentFlags().IntP("abuse-tcp-accept-rate", "", 20, "Accepted public TCP connections replenished per second per source IP and listening port")
 +	rootCmd.PersistentFlags().IntP("abuse-request-burst", "", 2000, "HTTP request burst per source IP")
 +	rootCmd.PersistentFlags().IntP("abuse-request-rate", "", 50, "HTTP requests replenished per second per source IP")
  
@@ -662,7 +666,7 @@ index 0000000..0f8373c
 +		if err != nil {
 +			return nil, err
 +		}
-+		release, ok := allowConnection(c.RemoteAddr().String(), l.Kind)
++		release, ok := allowConnection(c.RemoteAddr().String(), l.Kind, l.Listener.Addr().String())
 +		if !ok {
 +			_ = c.Close()
 +			continue
@@ -670,12 +674,26 @@ index 0000000..0f8373c
 +		return &limitedConn{Conn: c, release: release}, nil
 +	}
 +}
-+func allowConnection(addr, kind string) (func(), bool) {
++func allowConnection(addr, kind, listenerAddr string) (func(), bool) {
 +	ip := remoteIP(addr)
++	// Listener kind and address are part of the key so a user's long-lived SSH
++	// tunnel, HTTP traffic and traffic to each public TCP port cannot exhaust
++	// or block one another merely because they share a NAT address.
++	key := "connection:" + kind + ":" + listenerAddr + ":" + ip
 +	now := time.Now()
 +	abuseState.Lock()
 +	defer abuseState.Unlock()
-+	e := abuseState.m[ip]
++	e := abuseState.m[key]
++	burst := max(1, viper.GetInt("abuse-accept-burst"))
++	rate := max(1, viper.GetInt("abuse-accept-rate"))
++	maxConn := max(1, viper.GetInt("abuse-http-max-connections"))
++	if kind == "ssh" {
++		maxConn = max(1, viper.GetInt("abuse-ssh-max-connections"))
++	} else if kind == "tcp" {
++		burst = max(1, viper.GetInt("abuse-tcp-accept-burst"))
++		rate = max(1, viper.GetInt("abuse-tcp-accept-rate"))
++		maxConn = max(1, viper.GetInt("abuse-tcp-max-connections"))
++	}
 +	if e == nil {
 +		if len(abuseState.m) >= 10000 {
 +			for k, v := range abuseState.m {
@@ -688,19 +706,14 @@ index 0000000..0f8373c
 +			countSecurity("connection_limited", 1)
 +			return func() {}, false
 +		}
-+		e = &abuseEntry{tokens: float64(max(1, viper.GetInt("abuse-accept-burst"))), updated: now}
-+		abuseState.m[ip] = e
++		e = &abuseEntry{tokens: float64(burst), updated: now}
++		abuseState.m[key] = e
 +	}
 +	if now.Before(e.blocked) {
-+		countSecurity("temporarily_blocked", 1)
 +		return func() {}, false
 +	}
-+	e.tokens = min(float64(max(1, viper.GetInt("abuse-accept-burst"))), e.tokens+now.Sub(e.updated).Seconds())
++	e.tokens = min(float64(burst), e.tokens+now.Sub(e.updated).Seconds()*float64(rate))
 +	e.updated = now
-+	maxConn := max(1, viper.GetInt("abuse-http-max-connections"))
-+	if kind == "ssh" {
-+		maxConn = max(1, viper.GetInt("abuse-ssh-max-connections"))
-+	}
 +	if e.tokens < 1 || e.connections >= maxConn {
 +		e.violations++
 +		countSecurity("connection_limited", 1)
@@ -711,10 +724,13 @@ index 0000000..0f8373c
 +			}
 +			e.blocked = now.Add(block)
 +			e.violations = 0
++			// Count block transitions, not every retry during the block.
++			countSecurity("temporarily_blocked", 1)
 +		}
 +		return func() {}, false
 +	}
 +	e.tokens--
++	e.violations = 0
 +	e.connections++
 +	var once sync.Once
 +	return func() {
@@ -746,7 +762,6 @@ index 0000000..0f8373c
 +	}
 +	if now.Before(e.blocked) {
 +		abuseState.Unlock()
-+		countSecurity("temporarily_blocked", 1)
 +		return func() {}, false
 +	}
 +	e.tokens = min(float64(max(1, viper.GetInt("abuse-request-burst"))), e.tokens+now.Sub(e.updated).Seconds()*float64(max(1, viper.GetInt("abuse-request-rate"))))
@@ -760,12 +775,15 @@ index 0000000..0f8373c
 +			}
 +			e.blocked = now.Add(block)
 +			e.violations = 0
++			// Count block transitions, not every retry during the block.
++			countSecurity("temporarily_blocked", 1)
 +		}
 +		abuseState.Unlock()
 +		countSecurity("rate_limited", 1)
 +		return func() {}, false
 +	}
 +	e.tokens--
++	e.violations = 0
 +	abuseState.Unlock()
 +	return func() {}, true
 +}
@@ -918,6 +936,7 @@ index 0000000..71c4dc6
 +func (l *testListener) Addr() net.Addr { return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 80} }
 +func TestAbuseListenerCountsUntilConnectionClose(t *testing.T) {
 +	viper.Set("abuse-accept-burst", 60)
++	viper.Set("abuse-accept-rate", 1)
 +	viper.Set("abuse-ssh-max-connections", 20)
 +	t.Cleanup(viper.Reset)
 +	abuseState.Lock()
@@ -933,7 +952,8 @@ index 0000000..71c4dc6
 +		t.Fatal(err)
 +	}
 +	abuseState.Lock()
-+	n := abuseState.m["192.0.2.9"].connections
++	key := "connection:ssh:127.0.0.1:80:192.0.2.9"
++	n := abuseState.m[key].connections
 +	abuseState.Unlock()
 +	if n != 1 {
 +		t.Fatalf("connections=%d", n)
@@ -941,10 +961,113 @@ index 0000000..71c4dc6
 +	_ = c.Close()
 +	time.Sleep(time.Millisecond)
 +	abuseState.Lock()
-+	n = abuseState.m["192.0.2.9"].connections
++	n = abuseState.m[key].connections
 +	abuseState.Unlock()
 +	if n != 0 {
 +		t.Fatalf("connections after close=%d", n)
++	}
++}
++
++func TestConnectionLimitBucketsAreIsolatedByKindAndListener(t *testing.T) {
++	viper.Set("abuse-accept-burst", 60)
++	viper.Set("abuse-accept-rate", 1)
++	viper.Set("abuse-http-max-connections", 50)
++	viper.Set("abuse-ssh-max-connections", 20)
++	viper.Set("abuse-tcp-accept-burst", 240)
++	viper.Set("abuse-tcp-accept-rate", 20)
++	viper.Set("abuse-tcp-max-connections", 200)
++	t.Cleanup(viper.Reset)
++	abuseState.Lock()
++	abuseState.m = map[string]*abuseEntry{}
++	abuseState.Unlock()
++
++	releases := []func(){}
++	for _, tc := range []struct{ kind, listener string }{
++		{"ssh", "[::]:2222"},
++		{"http", "[::]:80"},
++		{"tcp", "[::]:25565"},
++		{"tcp", "[::]:25566"},
++	} {
++		release, ok := allowConnection("192.0.2.9:1234", tc.kind, tc.listener)
++		if !ok {
++			t.Fatalf("first %s %s connection was limited", tc.kind, tc.listener)
++		}
++		releases = append(releases, release)
++	}
++	defer func() { for _, release := range releases { release() } }()
++	abuseState.Lock()
++	n := len(abuseState.m)
++	abuseState.Unlock()
++	if n != 4 {
++		t.Fatalf("protocol/listener buckets not isolated: entries=%d", n)
++	}
++}
++func TestTemporaryBlockTelemetryCountsTransitionsOnly(t *testing.T) {
++	viper.Set("abuse-tcp-accept-burst", 100)
++	viper.Set("abuse-tcp-accept-rate", 1)
++	viper.Set("abuse-tcp-max-connections", 1)
++	viper.Set("abuse-temporary-block", time.Minute)
++	t.Cleanup(viper.Reset)
++	abuseState.Lock()
++	abuseState.m = map[string]*abuseEntry{}
++	abuseState.Unlock()
++	securityCounters.Lock()
++	previousBlocks := securityCounters.values["temporarily_blocked"]
++	securityCounters.values["temporarily_blocked"] = 0
++	securityCounters.Unlock()
++	defer func() {
++		securityCounters.Lock()
++		securityCounters.values["temporarily_blocked"] = previousBlocks
++		securityCounters.Unlock()
++	}()
++
++	release, ok := allowConnection("192.0.2.9:1234", "tcp", "[::]:25565")
++	if !ok {
++		t.Fatal("first connection was limited")
++	}
++	defer release()
++	for i := 0; i < 5; i++ {
++		if _, allowed := allowConnection("192.0.2.9:1234", "tcp", "[::]:25565"); allowed {
++			t.Fatal("connection above concurrent limit was allowed")
++		}
++	}
++	for i := 0; i < 100; i++ {
++		_, _ = allowConnection("192.0.2.9:1234", "tcp", "[::]:25565")
++	}
++	securityCounters.Lock()
++	blocks := securityCounters.values["temporarily_blocked"]
++	securityCounters.Unlock()
++	if blocks != 1 {
++		t.Fatalf("temporary block telemetry=%d, want one transition", blocks)
++	}
++}
++func TestSuccessfulConnectionResetsViolations(t *testing.T) {
++	viper.Set("abuse-tcp-accept-burst", 2)
++	viper.Set("abuse-tcp-accept-rate", 1)
++	viper.Set("abuse-tcp-max-connections", 1)
++	t.Cleanup(viper.Reset)
++	abuseState.Lock()
++	abuseState.m = map[string]*abuseEntry{}
++	abuseState.Unlock()
++
++	release, ok := allowConnection("192.0.2.9:1234", "tcp", "[::]:25565")
++	if !ok {
++		t.Fatal("first connection was limited")
++	}
++	if _, allowed := allowConnection("192.0.2.9:1234", "tcp", "[::]:25565"); allowed {
++		t.Fatal("connection above concurrent limit was allowed")
++	}
++	release()
++	secondRelease, ok := allowConnection("192.0.2.9:1234", "tcp", "[::]:25565")
++	if !ok {
++		t.Fatal("connection after release was limited")
++	}
++	defer secondRelease()
++	abuseState.Lock()
++	violations := abuseState.m["connection:tcp:[::]:25565:192.0.2.9"].violations
++	abuseState.Unlock()
++	if violations != 0 {
++		t.Fatalf("violations after successful connection=%d", violations)
 +	}
 +}
 +
