@@ -90,6 +90,31 @@ func TestAdminDeniedForNormalUser(t *testing.T) {
 		t.Fatalf("got %d", w.Code)
 	}
 }
+func TestAdminTunnelAndSecurityPagesAreSeparate(t *testing.T) {
+	s, st, token, _ := testServer(t)
+	if _, err := st.DB.Exec(`UPDATE users SET role='admin' WHERE discord_id='normal'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB.Exec(`INSERT INTO security_telemetry(bucket_start,event_type,count) VALUES(?,?,?)`, time.Now().UTC().Format(time.RFC3339), "rate_limited", 2); err != nil {
+		t.Fatal(err)
+	}
+	request := func(path string) string {
+		r := httptest.NewRequest(http.MethodGet, "/api/page?path="+path, nil)
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("path=%s status=%d body=%s", path, w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	if body := request("%2Fadmin%2Ftunnels"); !strings.Contains(body, `"Page":"admin-tunnels"`) || strings.Contains(body, `"SecurityMetrics"`) {
+		t.Fatalf("tunnel body=%s", body)
+	}
+	if body := request("%2Fadmin%2Fsecurity"); !strings.Contains(body, `"Page":"admin-security"`) || !strings.Contains(body, `"SecurityMetrics"`) || strings.Contains(body, `"ActiveTunnels"`) {
+		t.Fatalf("security body=%s", body)
+	}
+}
 func TestUnknownGetReturnsNotFound(t *testing.T) {
 	s, _, token, _ := testServer(t)
 	r := httptest.NewRequest(http.MethodGet, "/unknown", nil)
@@ -239,13 +264,13 @@ func TestTCPPortUserAndAdminRoutes(t *testing.T) {
 }
 
 func TestAdminPaginationParameters(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/admin/tunnels?tunnel_page=2&tunnel_per_page=30&security_page=3&security_per_page=50", nil)
-	page, size, offset := requestedPage(r, "tunnel_page", "tunnel_per_page")
+	r := httptest.NewRequest(http.MethodGet, "/admin/tunnels?page=2&per_page=30", nil)
+	page, size, offset := requestedPage(r, "page", "per_page")
 	if page != 2 || size != 30 || offset != 30 {
 		t.Fatalf("page=%d size=%d offset=%d", page, size, offset)
 	}
-	p := pagination(r, "tunnel_page", "tunnel_per_page", page, size, true)
-	if p.PreviousURL != "/admin/tunnels?security_page=3&security_per_page=50&tunnel_per_page=30" || p.NextURL != "/admin/tunnels?security_page=3&security_per_page=50&tunnel_page=3&tunnel_per_page=30" {
+	p := pagination(r, "page", "per_page", page, size, true)
+	if p.PreviousURL != "/admin/tunnels?per_page=30" || p.NextURL != "/admin/tunnels?page=3&per_page=30" {
 		t.Fatalf("previous=%q next=%q", p.PreviousURL, p.NextURL)
 	}
 	if len(p.PageSizes) != 4 || !p.PageSizes[1].Selected {

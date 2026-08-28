@@ -32,8 +32,6 @@ type pageDTO struct {
 	SecurityMetrics                 []securityMetricDTO `json:",omitempty"`
 	Stats                           *statsDTO           `json:",omitempty"`
 	Pagination                      *paginationDTO      `json:",omitempty"`
-	TunnelPagination                *paginationDTO      `json:",omitempty"`
-	SecurityPagination              *paginationDTO      `json:",omitempty"`
 	ActiveTunnelAvailable           *bool               `json:",omitempty"`
 }
 
@@ -168,10 +166,11 @@ func newPageDTO(p Page) pageDTO {
 		result.Pagination = paginationDTOFrom(p.Pagination)
 	case "admin-tunnels":
 		result.ActiveTunnels = activeTunnelDTOs(p.ActiveTunnels, true)
-		result.SecurityMetrics = securityMetricDTOs(p.SecurityMetrics)
 		result.ActiveTunnelAvailable = boolPointer(p.ActiveTunnelAvailable)
-		result.TunnelPagination = paginationDTOFrom(p.TunnelPagination)
-		result.SecurityPagination = paginationDTOFrom(p.SecurityPagination)
+		result.Pagination = paginationDTOFrom(p.Pagination)
+	case "admin-security":
+		result.SecurityMetrics = securityMetricDTOs(p.SecurityMetrics)
+		result.Pagination = paginationDTOFrom(p.Pagination)
 	}
 	return result
 }

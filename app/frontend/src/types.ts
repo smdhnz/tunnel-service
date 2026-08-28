@@ -24,6 +24,6 @@ export interface PageData {
   KeyCount?: number; SubdomainCount?: number; TCPPortCount?: number; FirstTCPPort?: number; ActiveTunnelCount?: number;
   Keys?: SSHKey[]; Subdomains?: Subdomain[]; TCPPorts?: TCPPort[]; Users?: AdminUser[]; Audit?: Audit[];
   ActiveTunnels?: ActiveTunnel[]; SecurityMetrics?: SecurityMetric[]; Stats?: Stats; Pagination?: Pagination;
-  TunnelPagination?: Pagination; SecurityPagination?: Pagination; ActiveTunnelAvailable?: boolean;
+  ActiveTunnelAvailable?: boolean;
 }
 export interface MutationResult { flash: string; error: string }

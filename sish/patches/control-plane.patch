@@ -49,9 +49,9 @@ index d825405..3e574c2 100644
  		}
  		c.Next()
  	}, gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-+		// Unknown-host scanner traffic is aggregated as security telemetry and
-+		// intentionally omitted from the application log.
-+		if param.StatusCode == http.StatusNotFound && param.Keys["httpHolder"] == nil {
++		// Keep routine proxy traffic out of Docker logs. Security events are
++		// aggregated separately; server errors remain visible.
++		if !viper.GetBool("debug") && param.StatusCode < http.StatusInternalServerError {
 +			return ""
 +		}
  		// Here is the logger we use to format each incoming request.

@@ -78,7 +78,7 @@ type Page struct {
 	ActiveTunnels                                                          []model.ActiveTunnel
 	SecurityMetrics                                                        []model.SecurityMetric
 	Stats                                                                  model.Stats
-	Pagination, TunnelPagination, SecurityPagination                       Pagination
+	Pagination                                                             Pagination
 	ActiveTunnelAvailable                                                  bool
 }
 
@@ -104,7 +104,7 @@ func (s *Server) routes() {
 	for _, path := range []string{"/{$}", "/keys", "/subdomains", "/tcp-ports", "/tunnels"} {
 		s.mux.Handle("GET "+path, s.auth(http.HandlerFunc(s.spaPage)))
 	}
-	for _, path := range []string{"/admin", "/admin/users", "/admin/keys", "/admin/subdomains", "/admin/tcp-ports", "/admin/tunnels"} {
+	for _, path := range []string{"/admin", "/admin/users", "/admin/keys", "/admin/subdomains", "/admin/tcp-ports", "/admin/tunnels", "/admin/security"} {
 		s.mux.Handle("GET "+path, s.auth(s.admin(http.HandlerFunc(s.spaPage))))
 	}
 
@@ -321,7 +321,7 @@ func (s *Server) apiPage(w http.ResponseWriter, r *http.Request) {
 		s.tcpPortsPage(w, request)
 	case "/tunnels":
 		s.tunnelsPage(w, request)
-	case "/admin", "/admin/users", "/admin/keys", "/admin/subdomains", "/admin/tcp-ports", "/admin/tunnels":
+	case "/admin", "/admin/users", "/admin/keys", "/admin/subdomains", "/admin/tcp-ports", "/admin/tunnels", "/admin/security":
 		if current(r).User.Role != "admin" {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
@@ -339,6 +339,8 @@ func (s *Server) apiPage(w http.ResponseWriter, r *http.Request) {
 			s.adminTCPPorts(w, request)
 		case "/admin/tunnels":
 			s.adminTunnels(w, request)
+		case "/admin/security":
+			s.adminSecurity(w, request)
 		}
 	default:
 		http.NotFound(w, r)
@@ -592,7 +594,6 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	if syncState, err := s.store.TunnelSyncState(r.Context()); err == nil {
 		p.ActiveTunnelAvailable = syncState.Available
 	}
-	p.SecurityMetrics, _ = s.store.RecentSecurityTelemetry(r.Context(), 12)
 	s.render(w, http.StatusOK, p)
 }
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request) {
@@ -644,24 +645,30 @@ func (s *Server) adminKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	s.actionRedirect(w, r, "/admin/keys", err, "key_deleted")
 }
 func (s *Server) adminTunnels(w http.ResponseWriter, r *http.Request) {
-	p := s.base(r, "トンネルとセキュリティ", "admin-tunnels")
-	tunnelPage, tunnelPageSize, tunnelOffset := requestedPage(r, "tunnel_page", "tunnel_per_page")
-	securityPage, securityPageSize, securityOffset := requestedPage(r, "security_page", "security_per_page")
+	p := s.base(r, "接続中のトンネル", "admin-tunnels")
+	page, pageSize, offset := requestedPage(r, "page", "per_page")
 	var more bool
 	var err error
-	if p.ActiveTunnels, more, err = s.store.ActiveTunnelsPage(r.Context(), nil, tunnelPageSize, tunnelOffset); err != nil {
+	if p.ActiveTunnels, more, err = s.store.ActiveTunnelsPage(r.Context(), nil, pageSize, offset); err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	p.TunnelPagination = pagination(r, "tunnel_page", "tunnel_per_page", tunnelPage, tunnelPageSize, more)
+	p.Pagination = pagination(r, "page", "per_page", page, pageSize, more)
 	if syncState, err := s.store.TunnelSyncState(r.Context()); err == nil {
 		p.ActiveTunnelAvailable = syncState.Available
 	}
-	if p.SecurityMetrics, more, err = s.store.SecurityTelemetryPage(r.Context(), securityPageSize, securityOffset); err != nil {
+	s.render(w, http.StatusOK, p)
+}
+func (s *Server) adminSecurity(w http.ResponseWriter, r *http.Request) {
+	p := s.base(r, "セキュリティ検知", "admin-security")
+	page, pageSize, offset := requestedPage(r, "page", "per_page")
+	var more bool
+	var err error
+	if p.SecurityMetrics, more, err = s.store.SecurityTelemetryPage(r.Context(), pageSize, offset); err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	p.SecurityPagination = pagination(r, "security_page", "security_per_page", securityPage, securityPageSize, more)
+	p.Pagination = pagination(r, "page", "per_page", page, pageSize, more)
 	s.render(w, http.StatusOK, p)
 }
 func (s *Server) adminSubdomains(w http.ResponseWriter, r *http.Request) {

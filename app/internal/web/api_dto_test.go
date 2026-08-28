@@ -64,9 +64,16 @@ func TestPageDTOAdminContractsDoNotExposeInternalModelFields(t *testing.T) {
 	key := keys["Keys"].([]any)[0].(map[string]any)
 	assertOnlyKeys(t, key, "ID", "Owner", "Name", "Fingerprint", "Enabled", "CreatedAt")
 
-	tunnels := dtoJSONMap(t, Page{Title: "tunnels", Page: "admin-tunnels", CSRF: "csrf", User: user, ActiveTunnels: []model.ActiveTunnel{{ID: "internal", UserID: 4, SSHKeyID: 5, Owner: "owner", KeyName: "key", Protocol: "http", Hostname: "app.example", SourceIP: "127.0.0.1", Status: "active", TCPPort: 12345, Generation: 8, EventSequence: 9, ConnectedAt: created, DisconnectedAt: created.Add(time.Hour)}}, TunnelPagination: Pagination{Page: 1}, SecurityPagination: Pagination{Page: 1}})
+	tunnels := dtoJSONMap(t, Page{Title: "tunnels", Page: "admin-tunnels", CSRF: "csrf", User: user, ActiveTunnels: []model.ActiveTunnel{{ID: "internal", UserID: 4, SSHKeyID: 5, Owner: "owner", KeyName: "key", Protocol: "http", Hostname: "app.example", SourceIP: "127.0.0.1", Status: "active", TCPPort: 12345, Generation: 8, EventSequence: 9, ConnectedAt: created, DisconnectedAt: created.Add(time.Hour)}}, Pagination: Pagination{Page: 1}})
 	tunnel := tunnels["ActiveTunnels"].([]any)[0].(map[string]any)
 	assertOnlyKeys(t, tunnel, "owner", "key_name", "protocol", "hostname", "source_ip", "status", "port", "connected_at")
+	if _, ok := tunnels["SecurityMetrics"]; ok {
+		t.Fatal("tunnel page includes security metrics")
+	}
+	security := dtoJSONMap(t, Page{Title: "security", Page: "admin-security", CSRF: "csrf", User: user, SecurityMetrics: []model.SecurityMetric{{BucketStart: created, EventType: "rate_limited", Count: 2}}, Pagination: Pagination{Page: 1}})
+	if _, ok := security["ActiveTunnels"]; ok {
+		t.Fatal("security page includes active tunnels")
+	}
 }
 
 func TestPageDTOAdminUserKeepsOnlyDisplayedAndActionFields(t *testing.T) {

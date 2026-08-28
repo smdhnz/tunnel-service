@@ -16,3 +16,13 @@ export function securityEventLabel(event: string): string {
     authorization_denied: '認証・認可の拒否',
   } as Record<string, string>)[event] ?? event;
 }
+
+export function securityEventDescription(event: string): string {
+  return ({
+    unknown_host: '未登録のホスト名への通信を404で拒否しました',
+    rate_limited: '送信元IPからの過剰なリクエストを429で拒否しました',
+    temporarily_blocked: '上限超過を繰り返した送信元IPを5分間遮断しました',
+    connection_limited: '同時接続数を超えた新規接続を拒否しました',
+    authorization_denied: '未登録鍵または未予約の公開先への接続を拒否しました',
+  } as Record<string, string>)[event] ?? '検知して記録しました';
+}
