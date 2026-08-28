@@ -55,13 +55,11 @@ function ConfirmButton({ message, className = 'link-button danger', children, ac
   return <button type="button" className={className} onClick={() => { if (window.confirm(message)) void mutate(action); }}>{children}</button>;
 }
 function Pagination({ value }: { value?: PaginationData }) {
-  const navigate = useNavigate();
   if (!value?.Page) return null;
   return <nav className="pagination" aria-label="ページネーション">
     <div>{value.PreviousURL && <Link className="button secondary" to={value.PreviousURL} rel="prev">← 前へ</Link>}</div>
     <span>{value.Page}ページ</span>
     <div className="pagination-end">{value.NextURL && <Link className="button secondary" to={value.NextURL} rel="next">次へ →</Link>}</div>
-    <label className="page-size">表示件数<select value={(value.PageSizes ?? []).find((item) => item.Selected)?.URL ?? ''} onChange={(event) => navigate(event.target.value)}>{(value.PageSizes ?? []).map((item) => <option key={item.Size} value={item.URL}>{item.Size}件</option>)}</select></label>
   </nav>;
 }
 function PageHead({ eyebrow, title, text, action }: { eyebrow?: string; title: string; text: string; action?: ReactNode }) {

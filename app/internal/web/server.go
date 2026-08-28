@@ -17,7 +17,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,17 +53,9 @@ const secureOAuthCookie = "__Host-oauth_state"
 
 const defaultAdminPageSize = 10
 
-var adminPageSizes = [...]int{10, 30, 50, 100}
-
-type PageSizeOption struct {
-	Size     int
-	URL      string
-	Selected bool
-}
 type Pagination struct {
 	Page                 int
 	PreviousURL, NextURL string
-	PageSizes            []PageSizeOption
 }
 type Page struct {
 	Title, Page, CSRF, Flash, Error, TunnelDomain, SSHHost, ConnectCommand string
@@ -725,44 +716,33 @@ func (s *Server) adminSubdomainRelease(w http.ResponseWriter, r *http.Request) {
 	s.actionRedirect(w, r, "/admin/subdomains", err, "subdomain_released")
 }
 
-func requestedPage(r *http.Request, pageParameter, sizeParameter string) (int, int, int) {
+func requestedPage(r *http.Request, pageParameter, _ string) (int, int, int) {
 	page, err := strconv.Atoi(r.URL.Query().Get(pageParameter))
 	if err != nil || page < 1 || page > 1_000_000 {
 		page = 1
 	}
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get(sizeParameter))
-	if !slices.Contains(adminPageSizes[:], pageSize) {
-		pageSize = defaultAdminPageSize
-	}
-	return page, pageSize, (page - 1) * pageSize
+	return page, defaultAdminPageSize, (page - 1) * defaultAdminPageSize
 }
-func pagination(r *http.Request, pageParameter, sizeParameter string, page, pageSize int, hasMore bool) Pagination {
+func pagination(r *http.Request, pageParameter, sizeParameter string, page, _ int, hasMore bool) Pagination {
 	p := Pagination{Page: page}
-	pageURL := func(n, size int) string {
+	pageURL := func(n int) string {
 		q := r.URL.Query()
 		if n == 1 {
 			q.Del(pageParameter)
 		} else {
 			q.Set(pageParameter, strconv.Itoa(n))
 		}
-		if size == defaultAdminPageSize {
-			q.Del(sizeParameter)
-		} else {
-			q.Set(sizeParameter, strconv.Itoa(size))
-		}
+		q.Del(sizeParameter)
 		if encoded := q.Encode(); encoded != "" {
 			return r.URL.Path + "?" + encoded
 		}
 		return r.URL.Path
 	}
 	if page > 1 {
-		p.PreviousURL = pageURL(page-1, pageSize)
+		p.PreviousURL = pageURL(page - 1)
 	}
 	if hasMore {
-		p.NextURL = pageURL(page+1, pageSize)
-	}
-	for _, size := range adminPageSizes {
-		p.PageSizes = append(p.PageSizes, PageSizeOption{Size: size, URL: pageURL(1, size), Selected: size == pageSize})
+		p.NextURL = pageURL(page + 1)
 	}
 	return p
 }

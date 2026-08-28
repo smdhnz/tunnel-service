@@ -16,8 +16,7 @@ export interface ActiveTunnel {
 }
 export interface SecurityMetric { BucketStart: string; EventType: string; Count: number }
 export interface Stats { Users: number; ActiveUsers: number; SSHKeys: number; Subdomains: number; TCPPorts: number; SuspendedUsers: number; ActiveTunnels: number }
-export interface PageSizeOption { Size: number; URL: string; Selected: boolean }
-export interface Pagination { Page: number; PreviousURL: string; NextURL: string; PageSizes: PageSizeOption[] }
+export interface Pagination { Page: number; PreviousURL: string; NextURL: string }
 export interface PageData {
   Title: string; Page: string; CSRF: string; Flash: string; Error: string; User: CurrentUser;
   TunnelDomain?: string; SSHHost?: string; ConnectCommand?: string; TCPConnectCommand?: string; SSHPort?: number;

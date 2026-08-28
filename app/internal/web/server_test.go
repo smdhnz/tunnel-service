@@ -263,18 +263,15 @@ func TestTCPPortUserAndAdminRoutes(t *testing.T) {
 	}
 }
 
-func TestAdminPaginationParameters(t *testing.T) {
+func TestAdminPaginationIsFixedAtTenItems(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/admin/tunnels?page=2&per_page=30", nil)
 	page, size, offset := requestedPage(r, "page", "per_page")
-	if page != 2 || size != 30 || offset != 30 {
+	if page != 2 || size != 10 || offset != 10 {
 		t.Fatalf("page=%d size=%d offset=%d", page, size, offset)
 	}
 	p := pagination(r, "page", "per_page", page, size, true)
-	if p.PreviousURL != "/admin/tunnels?per_page=30" || p.NextURL != "/admin/tunnels?page=3&per_page=30" {
+	if p.PreviousURL != "/admin/tunnels" || p.NextURL != "/admin/tunnels?page=3" {
 		t.Fatalf("previous=%q next=%q", p.PreviousURL, p.NextURL)
-	}
-	if len(p.PageSizes) != 4 || !p.PageSizes[1].Selected {
-		t.Fatalf("page sizes=%+v", p.PageSizes)
 	}
 
 	r = httptest.NewRequest(http.MethodGet, "/admin/users?page=invalid&per_page=25", nil)

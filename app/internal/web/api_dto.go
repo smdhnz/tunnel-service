@@ -101,13 +101,6 @@ type statsDTO struct {
 type paginationDTO struct {
 	Page                 int
 	PreviousURL, NextURL string
-	PageSizes            []pageSizeOptionDTO
-}
-
-type pageSizeOptionDTO struct {
-	Size     int
-	URL      string
-	Selected bool
 }
 
 func newPageDTO(p Page) pageDTO {
@@ -261,11 +254,7 @@ func statsDTOFrom(value model.Stats) *statsDTO {
 }
 
 func paginationDTOFrom(value Pagination) *paginationDTO {
-	result := &paginationDTO{Page: value.Page, PreviousURL: value.PreviousURL, NextURL: value.NextURL, PageSizes: make([]pageSizeOptionDTO, 0, len(value.PageSizes))}
-	for _, option := range value.PageSizes {
-		result.PageSizes = append(result.PageSizes, pageSizeOptionDTO{Size: option.Size, URL: option.URL, Selected: option.Selected})
-	}
-	return result
+	return &paginationDTO{Page: value.Page, PreviousURL: value.PreviousURL, NextURL: value.NextURL}
 }
 
 func boolPointer(value bool) *bool { return &value }
